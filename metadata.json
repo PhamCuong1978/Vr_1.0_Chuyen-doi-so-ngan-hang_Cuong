@@ -1,0 +1,5 @@
+{
+  "name": "Vr_1.0_Chuyen doi so ngan hang_Cuong",
+  "description": "Ứng dụng chuyển đổi số ngân hàng sử dụng Gemini và DeepSeek để xử lý sao kê và tương tác qua chat.",
+  "requestFramePermissions": []
+}
