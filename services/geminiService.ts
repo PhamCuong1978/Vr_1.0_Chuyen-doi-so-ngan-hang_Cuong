@@ -90,15 +90,23 @@ const callDeepSeek = async (messages: any[], jsonMode: boolean = true) => {
 export const extractTextFromContent = async (content: { images: { mimeType: string; data: string }[] }): Promise<string> => {
     if (content.images.length === 0) return '';
     
-    // Prompt OCR được điều chỉnh: Bỏ chế độ "Scanner thô", chuyển sang trích xuất thông minh giữ cấu trúc.
-    const prompt = `Bạn là trợ lý nhập liệu kế toán chuyên nghiệp.
-    NHIỆM VỤ: Trích xuất toàn bộ dữ liệu văn bản từ hình ảnh sao kê ngân hàng.
+    // FIX: Prompt được viết lại hoàn toàn để tránh lỗi vẽ bảng (hallucination)
+    const prompt = `Bạn là công cụ OCR (Nhận dạng quang học) chính xác cao.
+    
+    NHIỆM VỤ:
+    Đọc và chép lại toàn bộ văn bản, con số xuất hiện trong các hình ảnh sao kê ngân hàng này.
 
-    YÊU CẦU THỰC HIỆN:
-    1. **Trích xuất đầy đủ**: Gõ lại chính xác mọi nội dung nhìn thấy trên hình ảnh, bao gồm: Ngày tháng, Mã giao dịch, Nội dung, Số tiền.
-    2. **Giữ cấu trúc bảng**: Ưu tiên trình bày dữ liệu dạng danh sách hoặc bảng để máy tính dễ đọc hiểu các cột.
-    3. **Không tóm tắt**: Tuyệt đối không bỏ qua các dòng giao dịch giống nhau. Nếu có 10 dòng giao dịch cùng ngày, hãy liệt kê đủ 10 dòng.
-    4. **Chính xác số liệu**: Giữ nguyên dấu phân cách ngàn (,) và thập phân (.) của các con số.`;
+    QUY TẮC BẮT BUỘC (TUÂN THỦ NGHIÊM NGẶT):
+    1. **RAW TEXT ONLY (CHỈ VĂN BẢN THÔ)**: Xuất ra kết quả dưới dạng từng dòng văn bản.
+    2. **KHÔNG KẺ BẢNG**: Tuyệt đối KHÔNG sử dụng Markdown Table (không dùng ký tự | hay --- để vẽ khung).
+    3. **KHÔNG TÓM TẮT**: Đọc thấy gì viết nấy. Nếu có 10 giao dịch, phải viết đủ 10 dòng.
+    4. **GIỮ NGUYÊN SỐ LIỆU**: Không làm tròn số, giữ nguyên dấu chấm/phẩy của số tiền.
+    5. Thứ tự đọc: Từ trái sang phải, từ trên xuống dưới.
+
+    Ví dụ output mong muốn:
+    01/01/2023 MBVC - Tra luong thang 1 10.000.000 VND
+    02/01/2023 123456 Rut tien mat 500.000
+    ...`;
 
     try {
         const ai = getGeminiAI();
