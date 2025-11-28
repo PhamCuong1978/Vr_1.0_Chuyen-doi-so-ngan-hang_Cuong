@@ -1,17 +1,47 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import type { GeminiResponse, AIChatResponse, ChatMessage } from '../types';
 
+// --- HELPER: Safe Env Getter ---
+const getEnvVar = (key: string): string | undefined => {
+    // 1. Thử lấy từ window.process (do index.tsx polyfill)
+    if (typeof window !== 'undefined' && (window as any).process?.env?.[key]) {
+        return (window as any).process.env[key];
+    }
+    // 2. Thử lấy trực tiếp từ process (nếu môi trường hỗ trợ Node global)
+    try {
+        if (typeof process !== 'undefined' && process.env?.[key]) {
+            return process.env[key];
+        }
+    } catch (e) {}
+
+    // 3. Thử lấy từ import.meta.env (Vite native) - fallback cuối
+    try {
+        const metaEnv = (import.meta as any).env;
+        if (metaEnv) {
+            return metaEnv[key] || metaEnv[`VITE_${key}`];
+        }
+    } catch (e) {}
+
+    return undefined;
+};
+
 // --- CONFIGURATION ---
 // 1. Gemini Key (Dùng cho OCR hình ảnh & Fallback Logic)
 const getGeminiAI = () => {
-    // API key must be obtained exclusively from process.env.API_KEY
-    return new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const apiKey = getEnvVar('API_KEY');
+    
+    // Kiểm tra kỹ hơn để tránh lỗi undefined hoặc key rỗng
+    if (!apiKey || apiKey.trim() === "" || apiKey.includes("VITE_API_KEY")) {
+        throw new Error("Lỗi API Key: Không tìm thấy 'VITE_API_KEY'. Hãy kiểm tra Settings > Environment Variables trên Vercel.");
+    }
+
+    return new GoogleGenAI({ apiKey: apiKey });
 };
 
 // 2. DeepSeek Key (Dùng cho Logic Kế toán & Chat)
 const getDeepSeekKey = () => {
-    const key = process.env.DEEPSEEK_API_KEY;
-    if (!key || key === "") {
+    const key = getEnvVar('DEEPSEEK_API_KEY');
+    if (!key || key.trim() === "") {
         return null;
     }
     return key;
@@ -60,11 +90,15 @@ const callDeepSeek = async (messages: any[], jsonMode: boolean = true) => {
 export const extractTextFromContent = async (content: { images: { mimeType: string; data: string }[] }): Promise<string> => {
     if (content.images.length === 0) return '';
     
-    const prompt = `Bạn là công cụ OCR tài chính. Nhiệm vụ: Trích xuất toàn bộ văn bản từ sao kê ngân hàng.
-    QUY TẮC:
-    1. Giữ nguyên định dạng số (dấu chấm/phẩy).
-    2. Tuyệt đối không bỏ sót số 0 (Ví dụ: 3,000,000 là ba triệu, không phải ba trăm).
-    3. Chỉ trả về văn bản thô, không thêm lời dẫn.`;
+    // Prompt OCR được điều chỉnh: Bỏ chế độ "Scanner thô", chuyển sang trích xuất thông minh giữ cấu trúc.
+    const prompt = `Bạn là trợ lý nhập liệu kế toán chuyên nghiệp.
+    NHIỆM VỤ: Trích xuất toàn bộ dữ liệu văn bản từ hình ảnh sao kê ngân hàng.
+
+    YÊU CẦU THỰC HIỆN:
+    1. **Trích xuất đầy đủ**: Gõ lại chính xác mọi nội dung nhìn thấy trên hình ảnh, bao gồm: Ngày tháng, Mã giao dịch, Nội dung, Số tiền.
+    2. **Giữ cấu trúc bảng**: Ưu tiên trình bày dữ liệu dạng danh sách hoặc bảng để máy tính dễ đọc hiểu các cột.
+    3. **Không tóm tắt**: Tuyệt đối không bỏ qua các dòng giao dịch giống nhau. Nếu có 10 dòng giao dịch cùng ngày, hãy liệt kê đủ 10 dòng.
+    4. **Chính xác số liệu**: Giữ nguyên dấu phân cách ngàn (,) và thập phân (.) của các con số.`;
 
     try {
         const ai = getGeminiAI();
@@ -78,7 +112,7 @@ export const extractTextFromContent = async (content: { images: { mimeType: stri
         const modelRequest = {
             model: "gemini-2.5-flash", // Flash cực nhanh và rẻ cho OCR
             contents: { parts: [{ text: prompt }, ...imageParts] },
-            config: { temperature: 0 }
+            config: { temperature: 0 } // Nhiệt độ 0 để đảm bảo tính nhất quán cao nhất
         };
 
         const response = await ai.models.generateContent(modelRequest);
@@ -128,11 +162,13 @@ const responseSchema = {
 const processStatementWithGemini = async (text: string): Promise<GeminiResponse> => {
     console.log("Using Gemini Fallback for Processing...");
     const ai = getGeminiAI();
-    const prompt = `Bạn là chuyên gia kế toán. Xử lý sao kê sau thành JSON:
-    1. Tách phí/thuế ra khỏi giao dịch gốc.
-    2. Giao dịch Ngân hàng ghi Nợ -> Sổ cái ghi Có (credit).
-    3. Giao dịch Ngân hàng ghi Có -> Sổ cái ghi Nợ (debit).
-    4. Trích xuất số dư đầu/cuối kỳ.
+    const prompt = `Bạn là chuyên gia kế toán. Xử lý văn bản sao kê thô sau thành JSON.
+    QUY TẮC AN TOÀN (CHỐNG MẤT DỮ LIỆU):
+    1. Rà soát từng dòng văn bản. Nếu dòng đó có chứa NGÀY THÁNG (DD/MM/YYYY) và SỐ TIỀN -> Đó là một giao dịch. BẮT BUỘC PHẢI LẤY.
+    2. Không được gộp các giao dịch giống nhau.
+    3. Tách phí/thuế ra khỏi giao dịch gốc.
+    4. Giao dịch Ngân hàng ghi Nợ -> Sổ cái ghi Có (credit).
+    5. Giao dịch Ngân hàng ghi Có -> Sổ cái ghi Nợ (debit).
     Nội dung: ${text}`;
 
     const modelRequest = {
@@ -178,15 +214,15 @@ export const processStatement = async (content: { text: string; }): Promise<Gemi
         ]
     }
 
-    QUY TẮC NGHIỆP VỤ (QUAN TRỌNG):
-    1. **Tách Phí & Thuế**: Nếu dòng giao dịch có phí/VAT, hãy tách riêng ra khỏi số tiền gốc (\`credit\`).
-    2. **Định dạng Số**: Xử lý dấu phân cách ngàn (,) và thập phân (.) theo chuẩn Việt Nam.
+    QUY TẮC NGHIỆP VỤ & CHỐNG MẤT DỮ LIỆU (QUAN TRỌNG):
+    1. **QUÉT TOÀN BỘ**: Đọc kỹ từng dòng văn bản. Nếu thấy định dạng ngày tháng (như 04/01/2023, 05/01/2023...) đi kèm số tiền, đó CHẮC CHẮN là giao dịch. KHÔNG ĐƯỢC BỎ QUA.
+    2. **Tách Phí & Thuế**: Nếu dòng giao dịch có phí/VAT, hãy tách riêng ra khỏi số tiền gốc (\`credit\`).
     3. **Đảo Nợ/Có**: 
        - Sao kê ghi "C" (Credit/Tiền vào) -> JSON \`debit\` (Tăng tiền).
        - Sao kê ghi "D" (Debit/Tiền ra) -> JSON \`credit\` (Giảm tiền).
     4. **Chính xác tuyệt đối**: Không làm tròn số, không bỏ sót số 0.`;
 
-    const userPrompt = `Phân tích nội dung sao kê sau và trả về JSON:\n\n${content.text}`;
+    const userPrompt = `Phân tích nội dung sao kê sau và trả về JSON. Chú ý kỹ các giao dịch ngày 04/01/2023 hoặc các ngày nằm giữa:\n\n${content.text}`;
 
     try {
         // Ưu tiên dùng DeepSeek
