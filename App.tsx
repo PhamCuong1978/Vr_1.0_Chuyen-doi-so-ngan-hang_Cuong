@@ -44,10 +44,12 @@ export default function App() {
         };
     }, []);
     
-    const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
         const files = event.target.files;
         if (files && files.length > 0) {
             const newFiles = Array.from(files);
+            // Kết hợp file cũ và mới để kiểm tra tổng thể
+            const allFiles = [...selectedFiles, ...newFiles];
             
             // Reset kết quả xử lý cũ vì đầu vào đã thay đổi
             setResult(null);
@@ -57,16 +59,42 @@ export default function App() {
             setLoadingState('idle');
 
             // Nối file mới vào danh sách cũ
-            setSelectedFiles(prev => {
-                // Có thể thêm logic lọc trùng lặp ở đây nếu cần, hiện tại cho phép trùng tên
-                return [...prev, ...newFiles];
-            });
+            setSelectedFiles(prev => [...prev, ...newFiles]);
 
-            // Reset input value để cho phép chọn lại cùng 1 file nếu muốn (dù ít khi xảy ra)
+            // Reset input value
             event.target.value = '';
 
             // Bắt đầu giả lập quá trình Upload
             simulateUploadProcess();
+
+            // --- AUTO DETECT & EXTRACT (TỰ ĐỘNG CHUYỂN BƯỚC 3 NẾU LÀ TEXT) ---
+            // Kiểm tra: Nếu TẤT CẢ file đều KHÔNG phải là ảnh/pdf -> Tự động đọc ngay
+            const isAllTextFiles = allFiles.every(file => 
+                !file.type.startsWith('image/') && 
+                file.type !== 'application/pdf'
+            );
+
+            if (isAllTextFiles && allFiles.length > 0) {
+                try {
+                    // Chuyển trạng thái nhẹ để UI phản hồi (nếu file nặng)
+                    setLoadingState('extracting');
+                    
+                    const extractionPromises = allFiles.map((file: File) => extractFromFile(file));
+                    const results = await Promise.all(extractionPromises);
+                    
+                    // Gộp văn bản
+                    const combinedText = results.map(r => r.text).filter(Boolean).join('\n\n--- TÁCH BIỆT FILE ---\n\n');
+                    
+                    if (combinedText.trim()) {
+                        setStatementContent(combinedText.trim());
+                    }
+                } catch (err) {
+                    console.error("Lỗi tự động đọc file:", err);
+                    setError("Không thể tự động đọc file. Vui lòng thử nút Trích xuất thủ công.");
+                } finally {
+                    setLoadingState('idle');
+                }
+            }
         }
     };
 
@@ -325,7 +353,7 @@ export default function App() {
 
     const getLoadingMessage = () => {
         switch(loadingState) {
-            case 'extracting': return `Gemini Flash đang đọc ảnh... ${Math.round(progress)}%`;
+            case 'extracting': return `Đang đọc file văn bản... ${Math.round(progress)}%`; // Cập nhật thông báo
             case 'processing': return `DeepSeek V3 đang phân tích... ${Math.round(progress)}%`;
             default: return '';
         }
@@ -456,7 +484,7 @@ export default function App() {
                             {/* BƯỚC 2: TRÍCH XUẤT */}
                             <div className="mb-6">
                                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                                    2. Trích xuất văn bản (OCR để kiểm tra)
+                                    2. Trích xuất văn bản (OCR cho Ảnh/PDF)
                                 </label>
                                 <button
                                     onClick={handleExtractText}
@@ -468,7 +496,7 @@ export default function App() {
                                     `}
                                 >
                                     {loadingState === 'extracting' ? <ProcessIcon /> : null}
-                                    {loadingState === 'extracting' ? 'Đang đọc ảnh...' : `Trích xuất dữ liệu (${selectedFiles.length} file)`}
+                                    {loadingState === 'extracting' ? 'Đang đọc...' : `Trích xuất dữ liệu (${selectedFiles.length} file)`}
                                 </button>
                                 {selectedFiles.length === 0 && (
                                     <p className="mt-2 text-xs text-gray-500 italic text-center">Vui lòng chọn file ở Bước 1 trước.</p>
@@ -485,7 +513,7 @@ export default function App() {
                                     rows={6}
                                     value={statementContent}
                                     onChange={(e) => setStatementContent(e.target.value)}
-                                    placeholder="Nội dung văn bản trích xuất sẽ hiện ở đây. Bạn có thể dùng ô này để đối chiếu với file gốc..."
+                                    placeholder="Nội dung văn bản trích xuất sẽ hiện ở đây. Nếu bạn upload file Excel/Word, dữ liệu sẽ tự động hiện ra ngay."
                                     className="w-full px-3 py-2 text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
                                 />
                             </div>
@@ -540,11 +568,11 @@ export default function App() {
                         <ul className="space-y-4 text-gray-600 dark:text-gray-400">
                             <li className="flex items-start">
                                 <span className="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-indigo-500 text-white font-bold text-sm mr-3">1</span>
-                                <span><b>Upload File:</b> Chọn một hoặc nhiều file sao kê (ảnh hoặc PDF). Bạn có thể thêm file mới liên tục.</span>
+                                <span><b>Upload File:</b> Chọn file sao kê. Nếu là <b>Excel/Word</b>, dữ liệu sẽ tự động hiện ở Bước 3. Nếu là <b>Ảnh/PDF</b>, hãy làm tiếp Bước 2.</span>
                             </li>
                             <li className="flex items-start">
                                 <span className="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-indigo-500 text-white font-bold text-sm mr-3">2</span>
-                                <span><b>Trích xuất Văn bản:</b> Nhấn nút "Trích xuất dữ liệu" để AI gộp và đọc nội dung từ tất cả các file.</span>
+                                <span><b>Trích xuất Văn bản:</b> Dành cho file Ảnh hoặc PDF. AI sẽ đọc và chuyển thành văn bản.</span>
                             </li>
                              <li className="flex items-start">
                                 <span className="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-indigo-500 text-white font-bold text-sm mr-3">3</span>
