@@ -24,7 +24,7 @@ const ResultTable: React.FC<ResultTableProps> = ({ accountInfo, transactions, op
     const recognitionRef = useRef<any>(null);
 
     useEffect(() => {
-        console.log("ResultTable Mounted - v2.3"); // Log for debugging cache
+        console.log("ResultTable Mounted - v2.4"); // Log for debugging cache
         const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
         if (!SpeechRecognition) {
             console.warn("Speech Recognition not supported in this browser.");
@@ -62,13 +62,9 @@ const ResultTable: React.FC<ResultTableProps> = ({ accountInfo, transactions, op
 
         recognition.onerror = (event: any) => {
             console.error("Speech recognition error:", event.error);
-            
-            // Ignore 'no-speech' error as it simply means the user didn't speak within the timeout.
-            // We don't want to annoy the user with an alert for this.
             if (event.error === 'no-speech') {
                 return; 
             }
-
             let errorMessage = `Đã xảy ra lỗi nhận dạng giọng nói: ${event.error}.`;
              if (event.error === 'audio-capture') {
                 errorMessage = "Không tìm thấy micrô. Vui lòng kiểm tra xem micrô đã được kết nối và cấp quyền trong trình duyệt.";
@@ -102,44 +98,53 @@ const ResultTable: React.FC<ResultTableProps> = ({ accountInfo, transactions, op
     };
 
 
-    const { totalDebit, totalCredit, totalFee, totalVat, calculatedEndingBalance } = useMemo(() => {
+    const { totalDebit, totalCredit, totalFee, totalVat, totalCalculatedCredit, calculatedEndingBalance } = useMemo(() => {
         const totals = transactions.reduce((acc, tx) => {
             acc.totalDebit += tx.debit;
-            acc.totalCredit += tx.credit;
+            acc.totalCredit += tx.credit; // Raw credit (Số tiền giao dịch)
             acc.totalFee += tx.fee || 0;
             acc.totalVat += tx.vat || 0;
+            
+            // Total PS Có (Mới) = Credit + Fee + Vat
+            const lineTotalCredit = tx.credit + (tx.fee || 0) + (tx.vat || 0);
+            acc.totalCalculatedCredit += lineTotalCredit;
+            
             return acc;
-        }, { totalDebit: 0, totalCredit: 0, totalFee: 0, totalVat: 0 });
+        }, { totalDebit: 0, totalCredit: 0, totalFee: 0, totalVat: 0, totalCalculatedCredit: 0 });
         
-        const calculatedEndingBalance = openingBalance + totals.totalDebit - totals.totalCredit - totals.totalFee - totals.totalVat;
+        // Số dư = Đầu kỳ + Nợ - (Tổng PS Có mới)
+        const calculatedEndingBalance = openingBalance + totals.totalDebit - totals.totalCalculatedCredit;
         return { ...totals, calculatedEndingBalance };
     }, [transactions, openingBalance]);
 
 
     const generateTableData = useCallback(() => {
-        const headers = ["Mã GD", "Ngày giá trị", "Nội dung thanh toán", "Phát Sinh Nợ", "Phát Sinh Có", "Phí", "Thuế VAT", "Số dư"];
+        // Cập nhật Header cho CSV/Excel
+        const headers = ["Mã GD", "Ngày giá trị", "Nội dung thanh toán", "Phát Sinh Nợ", "Phát Sinh Có", "Số tiền giao dịch", "Phí", "Thuế VAT", "Số dư"];
         let runningBalance = openingBalance;
         
         const rows = transactions.map(tx => {
-            runningBalance = runningBalance + tx.debit - tx.credit - (tx.fee || 0) - (tx.vat || 0);
+            const calculatedCredit = tx.credit + (tx.fee || 0) + (tx.vat || 0);
+            runningBalance = runningBalance + tx.debit - calculatedCredit;
             return [
                 tx.transactionCode || '',
                 tx.date,
                 tx.description,
                 tx.debit,
-                tx.credit,
+                calculatedCredit, // PS Có (Tổng)
+                tx.credit,        // Số tiền giao dịch (Gốc)
                 tx.fee || 0,
                 tx.vat || 0,
                 runningBalance
             ];
         });
 
-        const initialRow = ['', '', 'Số dư đầu kỳ', '', '', '', '', openingBalance];
+        const initialRow = ['', '', 'Số dư đầu kỳ', '', '', '', '', '', openingBalance];
         
-        const totalRow = ['', '', 'Cộng phát sinh', totalDebit, totalCredit, totalFee, totalVat, calculatedEndingBalance];
+        const totalRow = ['', '', 'Cộng phát sinh', totalDebit, totalCalculatedCredit, totalCredit, totalFee, totalVat, calculatedEndingBalance];
 
         return { headers, rows: [initialRow, ...rows, totalRow] };
-    }, [transactions, openingBalance, totalDebit, totalCredit, totalFee, totalVat, calculatedEndingBalance]);
+    }, [transactions, openingBalance, totalDebit, totalCredit, totalFee, totalVat, totalCalculatedCredit, calculatedEndingBalance]);
 
 
     const handleDownload = () => {
@@ -149,7 +154,7 @@ const ResultTable: React.FC<ResultTableProps> = ({ accountInfo, transactions, op
             `"Số tài khoản:","${accountInfo.accountNumber || 'N/A'}"`,
             `"Ngân hàng:","${accountInfo.bankName || 'N/A'}"`,
             `"Chi nhánh:","${accountInfo.branch || 'N/A'}"`,
-            '' // Empty line for spacing
+            ''
         ];
         const csvContent = "data:text/csv;charset=utf-8," 
             + [...accountInfoRows, headers.join(','), ...rows.map(row => row.map(item => `"${String(item).replace(/"/g, '""')}"`).join(','))].join('\n');
@@ -170,7 +175,7 @@ const ResultTable: React.FC<ResultTableProps> = ({ accountInfo, transactions, op
             `Số tài khoản:\t${accountInfo.accountNumber || 'N/A'}`,
             `Ngân hàng:\t${accountInfo.bankName || 'N/A'}`,
             `Chi nhánh:\t${accountInfo.branch || 'N/A'}`,
-            '' // Empty line for spacing
+            ''
         ];
         const tsvContent = [...accountInfoRows, headers.join('\t'), ...rows.map(row => row.join('\t'))].join('\n');
         
@@ -186,14 +191,16 @@ const ResultTable: React.FC<ResultTableProps> = ({ accountInfo, transactions, op
     const handleOpenHtml = () => {
         let currentBalance = openingBalance;
         const tableRowsHtml = transactions.map(tx => {
-            currentBalance += tx.debit - tx.credit - (tx.fee || 0) - (tx.vat || 0);
+            const calculatedCredit = tx.credit + (tx.fee || 0) + (tx.vat || 0);
+            currentBalance += tx.debit - calculatedCredit;
             return `
                 <tr>
                     <td>${tx.transactionCode || ''}</td>
                     <td>${tx.date}</td>
                     <td>${tx.description}</td>
                     <td style="color: green;">${tx.debit > 0 ? formatCurrency(tx.debit) : ''}</td>
-                    <td style="color: red;">${tx.credit > 0 ? formatCurrency(tx.credit) : ''}</td>
+                    <td style="color: red; font-weight: bold;">${calculatedCredit > 0 ? formatCurrency(calculatedCredit) : ''}</td>
+                    <td>${tx.credit > 0 ? formatCurrency(tx.credit) : ''}</td>
                     <td>${(tx.fee || 0) > 0 ? formatCurrency(tx.fee!) : ''}</td>
                     <td>${(tx.vat || 0) > 0 ? formatCurrency(tx.vat!) : ''}</td>
                     <td>${formatCurrency(currentBalance)}</td>
@@ -216,7 +223,7 @@ const ResultTable: React.FC<ResultTableProps> = ({ accountInfo, transactions, op
                     th { background-color: #f2f2f2; font-weight: bold; }
                     tr:nth-child(even) { background-color: #f9f9f9; }
                     tr:hover { background-color: #f1f1f1; }
-                    td:nth-child(4), td:nth-child(5), td:nth-child(6), td:nth-child(7), td:nth-child(8) { text-align: right; font-family: monospace; }
+                    td:nth-child(4), td:nth-child(5), td:nth-child(6), td:nth-child(7), td:nth-child(8), td:nth-child(9) { text-align: right; font-family: monospace; }
                     tfoot tr { background-color: #f8fafc; font-weight: bold; }
                 </style>
             </head>
@@ -236,6 +243,7 @@ const ResultTable: React.FC<ResultTableProps> = ({ accountInfo, transactions, op
                             <th>Nội dung</th>
                             <th>PS Nợ</th>
                             <th>PS Có</th>
+                            <th>Số tiền giao dịch</th>
                             <th>Phí</th>
                             <th>Thuế VAT</th>
                             <th>Số dư</th>
@@ -243,7 +251,7 @@ const ResultTable: React.FC<ResultTableProps> = ({ accountInfo, transactions, op
                     </thead>
                     <tbody>
                         <tr style="font-weight: bold;">
-                            <td colspan="7" style="text-align: center;">Số dư đầu kỳ</td>
+                            <td colspan="8" style="text-align: center;">Số dư đầu kỳ</td>
                             <td>${formatCurrency(openingBalance)}</td>
                         </tr>
                         ${tableRowsHtml}
@@ -252,7 +260,8 @@ const ResultTable: React.FC<ResultTableProps> = ({ accountInfo, transactions, op
                         <tr style="font-weight: bold; border-top: 2px solid #e2e8f0;">
                             <td colspan="3" style="text-align: center;">Cộng phát sinh</td>
                             <td style="text-align: right; color: green;">${formatCurrency(totalDebit)}</td>
-                            <td style="text-align: right; color: red;">${formatCurrency(totalCredit)}</td>
+                            <td style="text-align: right; color: red;">${formatCurrency(totalCalculatedCredit)}</td>
+                            <td style="text-align: right;">${formatCurrency(totalCredit)}</td>
                             <td style="text-align: right;">${formatCurrency(totalFee)}</td>
                             <td style="text-align: right;">${formatCurrency(totalVat)}</td>
                             <td style="text-align: right;">${formatCurrency(calculatedEndingBalance)}</td>
@@ -305,18 +314,26 @@ const ResultTable: React.FC<ResultTableProps> = ({ accountInfo, transactions, op
                 <table className="min-w-full text-sm text-left text-gray-500 dark:text-gray-400">
                     <thead className="text-xs text-gray-700 uppercase bg-gray-50 dark:bg-gray-700 dark:text-gray-400 sticky top-0 z-10">
                         <tr>
-                            {["Mã GD", "Ngày", "Nội dung", "PS Nợ", "PS Có", "Phí", "Thuế VAT", "Số dư"].map((header, idx) => (
+                            {["Mã GD", "Ngày", "Nội dung", "PS Nợ", "PS Có", "Số tiền giao dịch", "Phí", "Thuế VAT", "Số dư"].map((header, idx) => (
                                 <th key={header} scope="col" className={`px-2 md:px-6 py-3 ${idx === 0 ? 'sticky left-0 bg-gray-50 dark:bg-gray-700' : ''}`}>{header}</th>
                             ))}
                         </tr>
                     </thead>
                     <tbody>
                         <tr className="bg-white border-b dark:bg-gray-800 dark:border-gray-700 font-semibold">
-                            <td colSpan={7} className="px-2 md:px-6 py-4 text-center sticky left-0 bg-white dark:bg-gray-800">Số dư đầu kỳ</td>
+                            <td colSpan={8} className="px-2 md:px-6 py-4 text-center sticky left-0 bg-white dark:bg-gray-800">Số dư đầu kỳ</td>
                             <td className="px-2 md:px-6 py-4 text-right">{formatCurrency(openingBalance)}</td>
                         </tr>
                         {transactions.map((tx, index) => {
-                            currentBalance = openingBalance + transactions.slice(0, index + 1).reduce((acc, currentTx) => acc + currentTx.debit - currentTx.credit - (currentTx.fee || 0) - (currentTx.vat || 0), 0);
+                            // Logic tính toán: PS Có = Gốc + Phí + VAT
+                            const calculatedCredit = tx.credit + (tx.fee || 0) + (tx.vat || 0);
+                            
+                            // Logic số dư lũy kế
+                            currentBalance = openingBalance + transactions.slice(0, index + 1).reduce((acc, currentTx) => {
+                                const lineCredit = currentTx.credit + (currentTx.fee || 0) + (currentTx.vat || 0);
+                                return acc + currentTx.debit - lineCredit;
+                            }, 0);
+                            
                             const isListening = (field: EditableTransactionField) => listeningFor?.index === index && listeningFor?.field === field;
 
                             return (
@@ -354,6 +371,7 @@ const ResultTable: React.FC<ResultTableProps> = ({ accountInfo, transactions, op
                                             <MicrophoneIcon isListening={isListening('description')} onClick={() => handleVoiceInput(index, 'description')} />
                                         </div>
                                     </td>
+                                    {/* Cột PS Nợ */}
                                     <td className="px-2 md:px-6 py-4 text-right text-green-600 dark:text-green-400">
                                         <div className="flex items-center justify-end space-x-2">
                                             <input
@@ -368,7 +386,12 @@ const ResultTable: React.FC<ResultTableProps> = ({ accountInfo, transactions, op
                                             <MicrophoneIcon isListening={isListening('debit')} onClick={() => handleVoiceInput(index, 'debit')} />
                                         </div>
                                     </td>
-                                    <td className="px-2 md:px-6 py-4 text-right text-red-600 dark:text-red-400">
+                                    {/* Cột PS Có (MỚI - Tính toán tự động) */}
+                                    <td className="px-2 md:px-6 py-4 text-right text-red-600 dark:text-red-400 font-bold bg-gray-50 dark:bg-gray-700">
+                                        {formatCurrency(calculatedCredit)}
+                                    </td>
+                                    {/* Cột Số tiền giao dịch (CŨ - Cho phép sửa) */}
+                                    <td className="px-2 md:px-6 py-4 text-right">
                                          <div className="flex items-center justify-end space-x-2">
                                             <input
                                                 type="text"
@@ -419,7 +442,9 @@ const ResultTable: React.FC<ResultTableProps> = ({ accountInfo, transactions, op
                         <tr className="font-semibold text-gray-900 dark:text-white">
                             <td colSpan={3} className="px-2 md:px-6 py-3 text-center text-base sticky left-0 bg-gray-50 dark:bg-gray-700">Cộng phát sinh</td>
                             <td className="px-2 md:px-6 py-3 text-right text-base text-green-600 dark:text-green-400">{formatCurrency(totalDebit)}</td>
-                            <td className="px-2 md:px-6 py-3 text-right text-base text-red-600 dark:text-red-400">{formatCurrency(totalCredit)}</td>
+                            {/* Tổng PS Có mới */}
+                            <td className="px-2 md:px-6 py-3 text-right text-base text-red-600 dark:text-red-400">{formatCurrency(totalCalculatedCredit)}</td>
+                            <td className="px-2 md:px-6 py-3 text-right text-base">{formatCurrency(totalCredit)}</td>
                             <td className="px-2 md:px-6 py-3 text-right text-base">{formatCurrency(totalFee)}</td>
                             <td className="px-2 md:px-6 py-3 text-right text-base">{formatCurrency(totalVat)}</td>
                             <td className="px-2 md:px-6 py-3 text-right text-base font-bold">{formatCurrency(calculatedEndingBalance)}</td>

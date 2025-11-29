@@ -47,6 +47,47 @@ const getDeepSeekKey = () => {
     return key;
 };
 
+// --- HELPER: JSON CLEANER & PARSER (CRITICAL FIX) ---
+/**
+ * Hàm này chịu trách nhiệm trích xuất chuỗi JSON hợp lệ từ phản hồi hỗn loạn của AI.
+ * Nó tìm dấu { đầu tiên và dấu } cuối cùng để loại bỏ lời dẫn chuyện.
+ */
+const cleanAndParseJSON = <T>(text: string | undefined | null): T => {
+    if (!text || typeof text !== 'string' || text.trim() === '') {
+        throw new Error("AI trả về dữ liệu rỗng (Empty Response).");
+    }
+
+    try {
+        // 1. Thử parse trực tiếp (nếu AI trả về JSON chuẩn)
+        return JSON.parse(text) as T;
+    } catch (e) {
+        // 2. Nếu lỗi, thử trích xuất phần nằm giữa { ... } hoặc [ ... ]
+        // Tìm dấu mở { đầu tiên
+        const firstOpen = text.indexOf('{');
+        // Tìm dấu đóng } cuối cùng
+        const lastClose = text.lastIndexOf('}');
+
+        if (firstOpen !== -1 && lastClose !== -1 && lastClose > firstOpen) {
+            const jsonSubstring = text.substring(firstOpen, lastClose + 1);
+            try {
+                return JSON.parse(jsonSubstring) as T;
+            } catch (e2) {
+                console.error("JSON Parse Error (Substring):", e2);
+                // 3. Cố gắng dọn dẹp thêm các ký tự điều khiển vô hình
+                const cleaned = jsonSubstring.replace(/[\u0000-\u001F\u007F-\u009F]/g, "");
+                try {
+                     return JSON.parse(cleaned) as T;
+                } catch(e3) {
+                     throw new Error(`Không thể đọc cấu trúc JSON. Lỗi cú pháp: ${(e2 as Error).message}`);
+                }
+            }
+        }
+        
+        console.error("Raw AI Text:", text);
+        throw new Error("Không tìm thấy cấu trúc JSON hợp lệ trong phản hồi của AI.");
+    }
+};
+
 // --- HELPER: Call DeepSeek API ---
 const callDeepSeek = async (messages: any[], jsonMode: boolean = true) => {
     const apiKey = getDeepSeekKey();
@@ -190,7 +231,8 @@ const processStatementWithGemini = async (text: string): Promise<GeminiResponse>
     };
 
     const response = await ai.models.generateContent(modelRequest);
-    return JSON.parse(response.text || '{}') as GeminiResponse;
+    // FIX: Sử dụng hàm parse an toàn
+    return cleanAndParseJSON<GeminiResponse>(response.text);
 };
 
 /**
@@ -232,6 +274,8 @@ export const processStatement = async (content: { text: string; }): Promise<Gemi
 
     const userPrompt = `Phân tích nội dung sao kê sau và trả về JSON. Chú ý kỹ các giao dịch ngày 04/01/2023 hoặc các ngày nằm giữa:\n\n${content.text}`;
 
+    let result: GeminiResponse;
+
     try {
         // Ưu tiên dùng DeepSeek
         const jsonString = await callDeepSeek([
@@ -239,17 +283,36 @@ export const processStatement = async (content: { text: string; }): Promise<Gemi
             { role: "user", content: userPrompt }
         ]);
 
-        if (!jsonString) throw new Error("DeepSeek trả về rỗng.");
-        const cleanJson = jsonString.replace(/```json/g, '').replace(/```/g, '').trim();
-        return JSON.parse(cleanJson) as GeminiResponse;
+        // FIX: Sử dụng hàm parse an toàn thay vì parse trực tiếp
+        result = cleanAndParseJSON<GeminiResponse>(jsonString);
 
     } catch (error: any) {
+        console.warn("DeepSeek Error, falling back to Gemini:", error);
         // Fallback sang Gemini nếu DeepSeek lỗi hoặc không có key
-        if (error.message === "NO_DEEPSEEK_KEY" || error.message.includes("DeepSeek")) {
-            return await processStatementWithGemini(content.text);
+        if (error.message === "NO_DEEPSEEK_KEY" || error.message.includes("DeepSeek") || error.message.includes("JSON")) {
+            result = await processStatementWithGemini(content.text);
+        } else {
+             throw error;
         }
-        throw error;
     }
+
+    // --- SORTING LOGIC: Sort transactions by date ascending ---
+    if (result && result.transactions && Array.isArray(result.transactions)) {
+        result.transactions.sort((a, b) => {
+            const parseDate = (dateStr: string) => {
+                if (!dateStr) return 0;
+                // Try DD/MM/YYYY
+                const parts = dateStr.split('/');
+                if (parts.length === 3) {
+                    return new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0])).getTime();
+                }
+                return 0; 
+            };
+            return parseDate(a.date) - parseDate(b.date);
+        });
+    }
+
+    return result;
 };
 
 // --- GEMINI CHAT FALLBACK ---
@@ -289,7 +352,8 @@ const chatWithGemini = async (promptParts: any[]): Promise<AIChatResponse> => {
         },
     };
     const response = await ai.models.generateContent(modelRequest);
-    return JSON.parse(response.text || '{}') as AIChatResponse;
+    // FIX: Sử dụng hàm parse an toàn
+    return cleanAndParseJSON<AIChatResponse>(response.text);
 }
 
 /**
@@ -303,6 +367,7 @@ export const chatWithAI = async (
     image: { mimeType: string; data: string } | null
 ): Promise<AIChatResponse> => {
 
+    // --- INJECT RAW CONTENT INTO SYSTEM PROMPT ---
     const systemPrompt = `Bạn là "Trợ lý Kế toán của Anh Cường".
     1. Luôn xưng "Em", gọi "Anh Cường".
     2. Trả về JSON theo schema sau:
@@ -314,7 +379,15 @@ export const chatWithAI = async (
         "confirmationRequired": boolean
     }
     3. Nếu sửa/thêm -> confirmationRequired=true.
-    Dữ liệu hiện tại: ${JSON.stringify(currentReport)}`;
+    4. Nhiệm vụ quan trọng: Giúp đối chiếu dữ liệu lệch. Hãy so sánh Dữ liệu JSON hiện tại với Dữ liệu gốc (OCR Text) bên dưới để tìm nguyên nhân sai lệch.
+
+    Dữ liệu JSON hiện tại (đã xử lý): ${JSON.stringify(currentReport)}
+    
+    Dữ liệu gốc (OCR Text) từ sao kê:
+    -----------------------------------
+    ${rawStatementContent}
+    -----------------------------------
+    `;
 
     try {
         // DeepSeek Chat Attempt
@@ -334,8 +407,8 @@ export const chatWithAI = async (
             { role: "user", content: message }
         ], true);
 
-        const cleanJson = jsonString.replace(/```json/g, '').replace(/```/g, '').trim();
-        return JSON.parse(cleanJson) as AIChatResponse;
+        // FIX: Sử dụng hàm parse an toàn
+        return cleanAndParseJSON<AIChatResponse>(jsonString);
 
     } catch (error: any) {
         // Fallback Logic

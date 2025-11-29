@@ -1,6 +1,6 @@
 // Phiên bản hiện tại của ứng dụng
-// LƯU Ý: Số này sẽ được tự động cập nhật khi chạy lệnh: node scripts/auto_update_version.cjs
-export const CURRENT_VERSION = '1.0.1';
+// LƯU Ý: Trong môi trường dev/preview, cần cập nhật số này thủ công hoặc dùng script build CI/CD.
+export const CURRENT_VERSION = '1.0.6';
 
 /**
  * Công thức cập nhật phiên bản theo yêu cầu:
