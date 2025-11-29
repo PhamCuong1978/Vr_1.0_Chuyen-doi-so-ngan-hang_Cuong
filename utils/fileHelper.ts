@@ -15,9 +15,10 @@ export const extractFromFile = async (file: File): Promise<{ text: string | null
                     
                     for (let i = 1; i <= pdf.numPages; i++) {
                         const page = await pdf.getPage(i);
-                        // Tăng scale lên 3.5 để đảm bảo độ nét cao nhất cho các dòng chữ nhỏ.
-                        // Mức này giúp OCR chính xác hơn 40% so với 2.5
-                        const viewport = page.getViewport({ scale: 3.5 }); 
+                        // GIẢM SCALE TỪ 3.5 XUỐNG 2.0
+                        // Lý do: Scale 3.5 tạo ra ảnh quá lớn (4k-5k px), gây tràn bộ nhớ (Crash/Trắng màn hình) trên trình duyệt mobile hoặc máy cấu hình yếu.
+                        // Scale 2.0 vẫn đủ nét để AI OCR chính xác.
+                        const viewport = page.getViewport({ scale: 2.0 }); 
                         const canvas = document.createElement('canvas');
                         const context = canvas.getContext('2d');
                         if (!context) throw new Error('Could not get canvas context');
@@ -26,10 +27,10 @@ export const extractFromFile = async (file: File): Promise<{ text: string | null
 
                         await page.render({ canvasContext: context, viewport: viewport }).promise;
                         
-                        // Use PNG for lossless image quality
-                        const dataUrl = canvas.toDataURL('image/png'); 
+                        // Use JPEG with 0.8 quality instead of PNG to further reduce memory usage without losing readability text
+                        const dataUrl = canvas.toDataURL('image/jpeg', 0.85); 
                         const base64Data = dataUrl.split(',')[1];
-                        pageImages.push({ mimeType: 'image/png', data: base64Data });
+                        pageImages.push({ mimeType: 'image/jpeg', data: base64Data });
                     }
                     resolve({ text: null, images: pageImages });
                 } else if (file.type.startsWith('image/')) {
@@ -53,7 +54,7 @@ export const extractFromFile = async (file: File): Promise<{ text: string | null
                 }
             } catch (error) {
                 console.error("Error during file extraction:", error);
-                reject(error);
+                reject(new Error("Lỗi đọc file: Có thể file quá lớn hoặc bị hỏng."));
             }
         };
         reader.onerror = (error) => reject(error);
