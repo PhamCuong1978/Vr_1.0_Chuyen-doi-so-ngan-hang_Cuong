@@ -47,39 +47,94 @@ const getDeepSeekKey = () => {
     return key;
 };
 
-// --- HELPER: JSON CLEANER & PARSER (CRITICAL FIX) ---
+// --- HELPER: JSON CLEANER & PARSER (CRITICAL FIX v1.1.1) ---
 /**
  * Hàm này chịu trách nhiệm trích xuất chuỗi JSON hợp lệ từ phản hồi hỗn loạn của AI.
- * Nó tìm dấu { đầu tiên và dấu } cuối cùng để loại bỏ lời dẫn chuyện.
+ * UPDATE v1.1.1: Xử lý triệt để lỗi định dạng số (1.000.000 -> 1000000) gây lỗi parse.
  */
 const cleanAndParseJSON = <T>(text: string | undefined | null): T => {
     if (!text || typeof text !== 'string' || text.trim() === '') {
         throw new Error("AI trả về dữ liệu rỗng (Empty Response).");
     }
 
+    // Helper: Thử parse và tự sửa lỗi nếu cần
+    const attemptParse = (jsonStr: string): T => {
+        try {
+            return JSON.parse(jsonStr) as T;
+        } catch (e) {
+            let fixedStr = jsonStr;
+
+            // FIX 1: Loại bỏ comments (// ...)
+            fixedStr = fixedStr.replace(/\/\/.*$/gm, "");
+
+            // FIX 2: Loại bỏ dấu "..." (Ellipses)
+            fixedStr = fixedStr.replace(/,?\s*\.\.\./g, "");
+
+            // FIX 3: Lỗi thiếu dấu phẩy giữa các object: "}{" -> "},{"
+            fixedStr = fixedStr.replace(/}\s*{/g, "},{");
+            fixedStr = fixedStr.replace(/]\s*\[/g, "],[");
+
+            // FIX 4: Lỗi thừa dấu phẩy cuối cùng: ",}" -> "}"
+            fixedStr = fixedStr.replace(/,(\s*[}\]])/g, "$1");
+            
+            // FIX 5: Lỗi định dạng số có dấu chấm phân cách (1.000.000) gây lỗi cú pháp JSON
+            // Regex này tìm các pattern giống số tiền nằm sau dấu hai chấm, và xóa dấu chấm đi
+            // Cẩn thận: Chỉ xóa dấu chấm nếu nó nằm giữa các con số và không phải là thập phân duy nhất
+            // Pattern: : <spaces> digits . digits . digits
+            fixedStr = fixedStr.replace(/:\s*(\d{1,3})(\.(\d{3}))+(\s*[,}\]])/g, (match, p1, group2, suffix) => {
+                // Xóa tất cả dấu chấm trong phần match
+                const cleanNumber = match.replace(/\./g, '');
+                return cleanNumber;
+            });
+
+            // FIX 6: Xóa các ký tự điều khiển
+            fixedStr = fixedStr.replace(/[\u0000-\u0019]+/g, "");
+
+            if (fixedStr !== jsonStr) {
+                try {
+                    return JSON.parse(fixedStr) as T;
+                } catch (e2) {
+                    console.warn("Auto-fix JSON failed. Original error:", e);
+                    console.warn("Fix attempt error:", e2);
+                    throw e; // Throw lỗi gốc để debug
+                }
+            }
+            throw e;
+        }
+    };
+
     try {
-        // 1. Thử parse trực tiếp (nếu AI trả về JSON chuẩn)
-        return JSON.parse(text) as T;
+        // 0. Pre-clean: Xóa các block markdown
+        let cleanText = text.replace(/```json/g, "").replace(/```/g, "");
+
+        // 1. Thử parse trực tiếp
+        return attemptParse(cleanText);
     } catch (e) {
-        // 2. Nếu lỗi, thử trích xuất phần nằm giữa { ... } hoặc [ ... ]
-        // Tìm dấu mở { đầu tiên
+        // 2. Nếu lỗi, thử trích xuất phần nằm giữa { ... }
         const firstOpen = text.indexOf('{');
-        // Tìm dấu đóng } cuối cùng
         const lastClose = text.lastIndexOf('}');
 
         if (firstOpen !== -1 && lastClose !== -1 && lastClose > firstOpen) {
-            const jsonSubstring = text.substring(firstOpen, lastClose + 1);
+            let jsonSubstring = text.substring(firstOpen, lastClose + 1);
+            // Pre-clean substring
+            jsonSubstring = jsonSubstring.replace(/[\u0000-\u001F\u007F-\u009F]/g, "");
+            
             try {
-                return JSON.parse(jsonSubstring) as T;
+                return attemptParse(jsonSubstring);
             } catch (e2) {
-                console.error("JSON Parse Error (Substring):", e2);
-                // 3. Cố gắng dọn dẹp thêm các ký tự điều khiển vô hình
-                const cleaned = jsonSubstring.replace(/[\u0000-\u001F\u007F-\u009F]/g, "");
-                try {
-                     return JSON.parse(cleaned) as T;
-                } catch(e3) {
-                     throw new Error(`Không thể đọc cấu trúc JSON. Lỗi cú pháp: ${(e2 as Error).message}`);
-                }
+                 const err = e2 as Error;
+                 console.error("JSON Parse Error (Substring):", err.message);
+                 
+                 // Log ngữ cảnh lỗi để dễ debug
+                 const positionMatch = err.message.match(/position (\d+)/);
+                 if (positionMatch) {
+                     const pos = parseInt(positionMatch[1]);
+                     const start = Math.max(0, pos - 50);
+                     const end = Math.min(jsonSubstring.length, pos + 50);
+                     console.error("Error Context:", jsonSubstring.substring(start, end));
+                 }
+                 
+                 throw new Error(`Lỗi đọc dữ liệu AI: ${err.message}. (Hãy thử lại hoặc kiểm tra file đầu vào)`);
             }
         }
         
@@ -131,7 +186,6 @@ const callDeepSeek = async (messages: any[], jsonMode: boolean = true) => {
 export const extractTextFromContent = async (content: { images: { mimeType: string; data: string }[] }): Promise<string> => {
     if (content.images.length === 0) return '';
     
-    // FIX: Prompt được viết lại hoàn toàn để tránh lỗi vẽ bảng (hallucination)
     const prompt = `Bạn là công cụ OCR (Nhận dạng quang học) chính xác cao.
     
     NHIỆM VỤ:
@@ -141,7 +195,7 @@ export const extractTextFromContent = async (content: { images: { mimeType: stri
     1. **RAW TEXT ONLY (CHỈ VĂN BẢN THÔ)**: Xuất ra kết quả dưới dạng từng dòng văn bản.
     2. **KHÔNG KẺ BẢNG**: Tuyệt đối KHÔNG sử dụng Markdown Table (không dùng ký tự | hay --- để vẽ khung).
     3. **KHÔNG TÓM TẮT**: Đọc thấy gì viết nấy. Nếu có 10 giao dịch, phải viết đủ 10 dòng.
-    4. **GIỮ NGUYÊN SỐ LIỆU**: Không làm tròn số, giữ nguyên dấu chấm/phẩy của số tiền.
+    4. **GIỮ NGUYÊN SỐ LIỆU**: Không làm tròn số, giữ nguyên dấu chấm/phẩy của số tiền gốc.
     5. Thứ tự đọc: Từ trái sang phải, từ trên xuống dưới.
 
     Ví dụ output mong muốn:
@@ -159,9 +213,9 @@ export const extractTextFromContent = async (content: { images: { mimeType: stri
         }));
 
         const modelRequest = {
-            model: "gemini-2.5-flash", // Flash cực nhanh và rẻ cho OCR
+            model: "gemini-2.5-flash", 
             contents: { parts: [{ text: prompt }, ...imageParts] },
-            config: { temperature: 0 } // Nhiệt độ 0 để đảm bảo tính nhất quán cao nhất
+            config: { temperature: 0 }
         };
 
         const response = await ai.models.generateContent(modelRequest);
@@ -211,6 +265,7 @@ const responseSchema = {
 const processStatementWithGemini = async (text: string): Promise<GeminiResponse> => {
     console.log("Using Gemini Fallback for Processing...");
     const ai = getGeminiAI();
+    // UPDATE Prompt: Force Number Format
     const prompt = `Bạn là chuyên gia kế toán. Xử lý văn bản sao kê thô sau thành JSON.
     QUY TẮC AN TOÀN (CHỐNG MẤT DỮ LIỆU):
     1. Rà soát từng dòng văn bản. Nếu dòng đó có chứa NGÀY THÁNG (DD/MM/YYYY) và SỐ TIỀN -> Đó là một giao dịch. BẮT BUỘC PHẢI LẤY.
@@ -218,10 +273,17 @@ const processStatementWithGemini = async (text: string): Promise<GeminiResponse>
     3. Tách phí/thuế ra khỏi giao dịch gốc.
     4. Giao dịch Ngân hàng ghi Nợ -> Sổ cái ghi Có (credit).
     5. Giao dịch Ngân hàng ghi Có -> Sổ cái ghi Nợ (debit).
+    
+    QUAN TRỌNG VỀ ĐỊNH DẠNG SỐ:
+    - Các trường tiền tệ (debit, credit, fee, vat) bắt buộc phải là kiểu NUMBER chuẩn.
+    - KHÔNG ĐƯỢC dùng dấu chấm (.) hoặc phẩy (,) để phân cách hàng nghìn.
+    - SAI: 1.000.000 (Gây lỗi JSON)
+    - ĐÚNG: 1000000
+    
     Nội dung: ${text}`;
 
     const modelRequest = {
-      model: "gemini-3-pro-preview", // Use Pro for Logic fallback
+      model: "gemini-3-pro-preview", 
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -231,7 +293,6 @@ const processStatementWithGemini = async (text: string): Promise<GeminiResponse>
     };
 
     const response = await ai.models.generateContent(modelRequest);
-    // FIX: Sử dụng hàm parse an toàn
     return cleanAndParseJSON<GeminiResponse>(response.text);
 };
 
@@ -264,15 +325,13 @@ export const processStatement = async (content: { text: string; }): Promise<Gemi
         ]
     }
 
-    QUY TẮC NGHIỆP VỤ & CHỐNG MẤT DỮ LIỆU (QUAN TRỌNG):
-    1. **QUÉT TOÀN BỘ**: Đọc kỹ từng dòng văn bản. Nếu thấy định dạng ngày tháng (như 04/01/2023, 05/01/2023...) đi kèm số tiền, đó CHẮC CHẮN là giao dịch. KHÔNG ĐƯỢC BỎ QUA.
-    2. **Tách Phí & Thuế**: Nếu dòng giao dịch có phí/VAT, hãy tách riêng ra khỏi số tiền gốc (\`credit\`).
-    3. **Đảo Nợ/Có**: 
-       - Sao kê ghi "C" (Credit/Tiền vào) -> JSON \`debit\` (Tăng tiền).
-       - Sao kê ghi "D" (Debit/Tiền ra) -> JSON \`credit\` (Giảm tiền).
-    4. **Chính xác tuyệt đối**: Không làm tròn số, không bỏ sót số 0.`;
+    QUY TẮC NGHIỆP VỤ & CHỐNG LỖI (QUAN TRỌNG):
+    1. **QUÉT TOÀN BỘ**: Đọc kỹ từng dòng. Nếu thấy ngày tháng và số tiền -> Chắc chắn là giao dịch.
+    2. **ĐỊNH DẠNG SỐ TUYỆT ĐỐI**: Các trường tiền tệ (debit, credit...) PHẢI là số thuần (1000000). TUYỆT ĐỐI KHÔNG dùng dấu chấm/phẩy phân cách hàng nghìn (Cấm: 1.000.000, 1,000,000). Điều này cực kỳ quan trọng để tránh lỗi cú pháp.
+    3. **Tách Phí & Thuế**: Tách riêng ra khỏi số tiền gốc.
+    4. **Đảo Nợ/Có**: Ngân hàng C -> Sổ cái Debit. Ngân hàng D -> Sổ cái Credit.`;
 
-    const userPrompt = `Phân tích nội dung sao kê sau và trả về JSON. Chú ý kỹ các giao dịch ngày 04/01/2023 hoặc các ngày nằm giữa:\n\n${content.text}`;
+    const userPrompt = `Phân tích nội dung sao kê sau và trả về JSON chuẩn. Chú ý không bỏ sót giao dịch nào:\n\n${content.text}`;
 
     let result: GeminiResponse;
 
@@ -283,27 +342,22 @@ export const processStatement = async (content: { text: string; }): Promise<Gemi
             { role: "user", content: userPrompt }
         ]);
 
-        // FIX: Sử dụng hàm parse an toàn thay vì parse trực tiếp
         result = cleanAndParseJSON<GeminiResponse>(jsonString);
 
     } catch (error: any) {
         console.warn("DeepSeek Error, falling back to Gemini:", error);
-        // Fallback sang Gemini nếu DeepSeek lỗi hoặc không có key
-        if (error.message === "NO_DEEPSEEK_KEY" || error.message.includes("DeepSeek") || error.message.includes("JSON")) {
+        if (error.message === "NO_DEEPSEEK_KEY" || error.message.includes("DeepSeek") || error.message.includes("JSON") || error.message.includes("Parse")) {
             result = await processStatementWithGemini(content.text);
         } else {
              throw error;
         }
     }
 
-    // --- SORTING LOGIC UPDATE V1.0.8 ---
-    // 1. Sắp xếp theo ngày tăng dần.
-    // 2. Nếu cùng ngày: Ưu tiên PS Nợ (Tiền vào) lên trước PS Có (Tiền ra) để tránh âm quỹ.
+    // --- SORTING LOGIC ---
     if (result && result.transactions && Array.isArray(result.transactions)) {
         result.transactions.sort((a, b) => {
             const parseDate = (dateStr: string) => {
                 if (!dateStr) return 0;
-                // Try DD/MM/YYYY
                 const parts = dateStr.split('/');
                 if (parts.length === 3) {
                     return new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0])).getTime();
@@ -314,19 +368,15 @@ export const processStatement = async (content: { text: string; }): Promise<Gemi
             const dateA = parseDate(a.date);
             const dateB = parseDate(b.date);
 
-            // 1. So sánh ngày
-            if (dateA !== dateB) {
-                return dateA - dateB;
-            }
+            if (dateA !== dateB) return dateA - dateB;
 
-            // 2. Nếu cùng ngày -> Check loại giao dịch (Debit trước, Credit sau)
             const isDebitA = (a.debit || 0) > 0;
             const isDebitB = (b.debit || 0) > 0;
 
-            if (isDebitA && !isDebitB) return -1; // A là Nợ (vào), B là Có (ra) -> A lên trước
-            if (!isDebitA && isDebitB) return 1;  // A là Có (ra), B là Nợ (vào) -> B lên trước
+            if (isDebitA && !isDebitB) return -1;
+            if (!isDebitA && isDebitB) return 1;
 
-            return 0; // Cùng loại
+            return 0; 
         });
     }
 
@@ -370,7 +420,6 @@ const chatWithGemini = async (promptParts: any[]): Promise<AIChatResponse> => {
         },
     };
     const response = await ai.models.generateContent(modelRequest);
-    // FIX: Sử dụng hàm parse an toàn
     return cleanAndParseJSON<AIChatResponse>(response.text);
 }
 
@@ -385,31 +434,20 @@ export const chatWithAI = async (
     image: { mimeType: string; data: string } | null
 ): Promise<AIChatResponse> => {
 
-    // --- INJECT RAW CONTENT INTO SYSTEM PROMPT ---
     const systemPrompt = `Bạn là "Trợ lý Kế toán của Anh Cường".
     1. Luôn xưng "Em", gọi "Anh Cường".
-    2. Trả về JSON theo schema sau:
-    {
-        "responseText": string,
-        "action": "update" | "undo" | "add" | "query",
-        "update": { "index": number, "field": string, "newValue": number } | null,
-        "add": { ...Transaction object... } | null,
-        "confirmationRequired": boolean
-    }
-    3. Nếu sửa/thêm -> confirmationRequired=true.
-    4. Nhiệm vụ quan trọng: Giúp đối chiếu dữ liệu lệch. Hãy so sánh Dữ liệu JSON hiện tại với Dữ liệu gốc (OCR Text) bên dưới để tìm nguyên nhân sai lệch.
+    2. Trả về JSON theo schema.
+    3. QUAN TRỌNG: Khi đề xuất sửa đổi số liệu, 'newValue' phải là SỐ THUẦN (ví dụ: 500000), KHÔNG được có dấu chấm/phẩy phân cách (ví dụ: KHÔNG 500.000).
 
     Dữ liệu JSON hiện tại (đã xử lý): ${JSON.stringify(currentReport)}
     
-    Dữ liệu gốc (OCR Text) từ sao kê:
+    Dữ liệu gốc (OCR Text):
     -----------------------------------
     ${rawStatementContent}
     -----------------------------------
     `;
 
     try {
-        // DeepSeek Chat Attempt
-        // Lưu ý: DeepSeek không nhận ảnh, nếu có ảnh -> Fallback ngay sang Gemini
         if (image) {
             throw new Error("IMAGE_DETECTED");
         }
@@ -425,11 +463,9 @@ export const chatWithAI = async (
             { role: "user", content: message }
         ], true);
 
-        // FIX: Sử dụng hàm parse an toàn
         return cleanAndParseJSON<AIChatResponse>(jsonString);
 
     } catch (error: any) {
-        // Fallback Logic
         const geminiPromptParts: any[] = [{ text: systemPrompt + `\nLịch sử chat: ${JSON.stringify(chatHistory)}\nYêu cầu: ${message}` }];
         if (image) {
             geminiPromptParts.push({ text: "Hình ảnh đính kèm:" });
