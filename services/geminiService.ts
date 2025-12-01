@@ -47,7 +47,7 @@ const getDeepSeekKey = () => {
     return key;
 };
 
-// --- HELPER: JSON CLEANER & PARSER (CRITICAL FIX v1.1.1) ---
+// --- HELPER: JSON CLEANER & PARSER ---
 /**
  * Hàm này chịu trách nhiệm trích xuất chuỗi JSON hợp lệ từ phản hồi hỗn loạn của AI.
  * UPDATE v1.1.1: Xử lý triệt để lỗi định dạng số (1.000.000 -> 1000000) gây lỗi parse.
@@ -78,11 +78,7 @@ const cleanAndParseJSON = <T>(text: string | undefined | null): T => {
             fixedStr = fixedStr.replace(/,(\s*[}\]])/g, "$1");
             
             // FIX 5: Lỗi định dạng số có dấu chấm phân cách (1.000.000) gây lỗi cú pháp JSON
-            // Regex này tìm các pattern giống số tiền nằm sau dấu hai chấm, và xóa dấu chấm đi
-            // Cẩn thận: Chỉ xóa dấu chấm nếu nó nằm giữa các con số và không phải là thập phân duy nhất
-            // Pattern: : <spaces> digits . digits . digits
             fixedStr = fixedStr.replace(/:\s*(\d{1,3})(\.(\d{3}))+(\s*[,}\]])/g, (match, p1, group2, suffix) => {
-                // Xóa tất cả dấu chấm trong phần match
                 const cleanNumber = match.replace(/\./g, '');
                 return cleanNumber;
             });
@@ -96,7 +92,7 @@ const cleanAndParseJSON = <T>(text: string | undefined | null): T => {
                 } catch (e2) {
                     console.warn("Auto-fix JSON failed. Original error:", e);
                     console.warn("Fix attempt error:", e2);
-                    throw e; // Throw lỗi gốc để debug
+                    throw e; 
                 }
             }
             throw e;
@@ -116,7 +112,6 @@ const cleanAndParseJSON = <T>(text: string | undefined | null): T => {
 
         if (firstOpen !== -1 && lastClose !== -1 && lastClose > firstOpen) {
             let jsonSubstring = text.substring(firstOpen, lastClose + 1);
-            // Pre-clean substring
             jsonSubstring = jsonSubstring.replace(/[\u0000-\u001F\u007F-\u009F]/g, "");
             
             try {
@@ -125,7 +120,6 @@ const cleanAndParseJSON = <T>(text: string | undefined | null): T => {
                  const err = e2 as Error;
                  console.error("JSON Parse Error (Substring):", err.message);
                  
-                 // Log ngữ cảnh lỗi để dễ debug
                  const positionMatch = err.message.match(/position (\d+)/);
                  if (positionMatch) {
                      const pos = parseInt(positionMatch[1]);
@@ -193,8 +187,8 @@ export const extractTextFromContent = async (content: { images: { mimeType: stri
 
     QUY TẮC BẮT BUỘC (TUÂN THỦ NGHIÊM NGẶT):
     1. **RAW TEXT ONLY (CHỈ VĂN BẢN THÔ)**: Xuất ra kết quả dưới dạng từng dòng văn bản.
-    2. **KHÔNG KẺ BẢNG**: Tuyệt đối KHÔNG sử dụng Markdown Table (không dùng ký tự | hay --- để vẽ khung).
-    3. **KHÔNG TÓM TẮT**: Đọc thấy gì viết nấy. Nếu có 10 giao dịch, phải viết đủ 10 dòng.
+    2. **KHÔNG KẺ BẢNG**: Tuyệt đối KHÔNG sử dụng Markdown Table.
+    3. **KHÔNG TÓM TẮT**: Đọc thấy gì viết nấy.
     4. **GIỮ NGUYÊN SỐ LIỆU**: Không làm tròn số, giữ nguyên dấu chấm/phẩy của số tiền gốc.
     5. Thứ tự đọc: Từ trái sang phải, từ trên xuống dưới.
 
@@ -226,7 +220,7 @@ export const extractTextFromContent = async (content: { images: { mimeType: stri
     }
 }
 
-// --- GEMINI FALLBACK LOGIC ---
+// --- GEMINI FALLBACK LOGIC (IMPROVED STABILITY) ---
 const responseSchema = {
   type: Type.OBJECT,
   properties: {
@@ -262,44 +256,65 @@ const responseSchema = {
   required: ["accountInfo", "transactions", "openingBalance", "endingBalance"],
 };
 
+// UPDATE: Tách hàm gọi API để xử lý fallback
 const processStatementWithGemini = async (text: string): Promise<GeminiResponse> => {
     console.log("Using Gemini Fallback for Processing...");
     const ai = getGeminiAI();
-    // UPDATE Prompt: Force Number Format
+    
+    // UPDATE: Thêm quy tắc đảo ngược Nợ/Có rõ ràng
     const prompt = `Bạn là chuyên gia kế toán. Xử lý văn bản sao kê thô sau thành JSON.
     QUY TẮC AN TOÀN (CHỐNG MẤT DỮ LIỆU):
     1. Rà soát từng dòng văn bản. Nếu dòng đó có chứa NGÀY THÁNG (DD/MM/YYYY) và SỐ TIỀN -> Đó là một giao dịch. BẮT BUỘC PHẢI LẤY.
-    2. Không được gộp các giao dịch giống nhau.
-    3. Tách phí/thuế ra khỏi giao dịch gốc.
-    4. Giao dịch Ngân hàng ghi Nợ -> Sổ cái ghi Có (credit).
-    5. Giao dịch Ngân hàng ghi Có -> Sổ cái ghi Nợ (debit).
+    2. Tách phí/thuế ra khỏi giao dịch gốc.
+    
+    QUY TẮC ĐẢO NGƯỢC NỢ/CÓ (BẮT BUỘC PHẢI TUÂN THỦ):
+    - Sao kê ghi "Có" (Credit/Tiền vào) -> JSON điền vào trường 'debit'.
+    - Sao kê ghi "Nợ" (Debit/Tiền ra) -> JSON điền vào trường 'credit'.
+    - Ví dụ: Dòng "17/01 ... Ghi Có 16.000.000" -> { "debit": 16000000, "credit": 0 }
     
     QUAN TRỌNG VỀ ĐỊNH DẠNG SỐ:
     - Các trường tiền tệ (debit, credit, fee, vat) bắt buộc phải là kiểu NUMBER chuẩn.
     - KHÔNG ĐƯỢC dùng dấu chấm (.) hoặc phẩy (,) để phân cách hàng nghìn.
-    - SAI: 1.000.000 (Gây lỗi JSON)
-    - ĐÚNG: 1000000
+    - SAI: 1.000.000 -> ĐÚNG: 1000000
     
     Nội dung: ${text}`;
 
-    const modelRequest = {
-      model: "gemini-3-pro-preview", 
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: responseSchema,
-        temperature: 0,
-      },
-    };
+    // --- STRATEGY: TRY PRO, IF FAIL (500), FALLBACK TO FLASH ---
+    try {
+        console.log("Attempting with Gemini Pro (High IQ)...");
+        const response = await ai.models.generateContent({
+            model: "gemini-3-pro-preview", 
+            contents: prompt,
+            config: {
+                responseMimeType: "application/json",
+                responseSchema: responseSchema,
+                temperature: 0,
+            },
+        });
+        return cleanAndParseJSON<GeminiResponse>(response.text);
 
-    const response = await ai.models.generateContent(modelRequest);
-    return cleanAndParseJSON<GeminiResponse>(response.text);
+    } catch (error: any) {
+        console.warn("Gemini Pro failed (likely 500 or timeout). Switching to Gemini Flash (High Stability)...", error);
+        
+        // Fallback Call
+        const responseFallback = await ai.models.generateContent({
+            model: "gemini-2.5-flash", // Stable version
+            contents: prompt,
+            config: {
+                responseMimeType: "application/json",
+                responseSchema: responseSchema,
+                temperature: 0,
+            },
+        });
+        return cleanAndParseJSON<GeminiResponse>(responseFallback.text);
+    }
 };
 
 /**
  * Step 2: Processes the extracted text using DEEPSEEK V3 (with Gemini Fallback).
  */
 export const processStatement = async (content: { text: string; }): Promise<GeminiResponse> => {
+    // UPDATE: Cập nhật System Prompt với luật đảo ngược mạnh mẽ hơn
     const systemPrompt = `Bạn là Chuyên gia Kế toán Cao cấp (ACCAR). Nhiệm vụ: Chuyển đổi văn bản sao kê ngân hàng thô thành JSON cấu trúc sổ cái.
 
     CẤU TRÚC JSON BẮT BUỘC (RESPONSE SCHEMA):
@@ -317,8 +332,8 @@ export const processStatement = async (content: { text: string; }): Promise<Gemi
                 "transactionCode": string,
                 "date": string, // DD/MM/YYYY
                 "description": string,
-                "debit": number, // Tiền vào (Ngân hàng ghi Có -> Sổ cái ghi Nợ)
-                "credit": number, // Tiền ra GỐC (Ngân hàng ghi Nợ -> Sổ cái ghi Có). KHÔNG bao gồm phí/thuế.
+                "debit": number, // Tiền vào
+                "credit": number, // Tiền ra GỐC. KHÔNG bao gồm phí/thuế.
                 "fee": number, // Phí giao dịch tách riêng
                 "vat": number // Thuế tách riêng
             }
@@ -327,30 +342,30 @@ export const processStatement = async (content: { text: string; }): Promise<Gemi
 
     QUY TẮC NGHIỆP VỤ & CHỐNG LỖI (QUAN TRỌNG):
     1. **QUÉT TOÀN BỘ**: Đọc kỹ từng dòng. Nếu thấy ngày tháng và số tiền -> Chắc chắn là giao dịch.
-    2. **ĐỊNH DẠNG SỐ TUYỆT ĐỐI**: Các trường tiền tệ (debit, credit...) PHẢI là số thuần (1000000). TUYỆT ĐỐI KHÔNG dùng dấu chấm/phẩy phân cách hàng nghìn (Cấm: 1.000.000, 1,000,000). Điều này cực kỳ quan trọng để tránh lỗi cú pháp.
+    2. **ĐỊNH DẠNG SỐ TUYỆT ĐỐI**: Các trường tiền tệ PHẢI là số thuần (1000000). TUYỆT ĐỐI KHÔNG dùng dấu chấm/phẩy phân cách hàng nghìn.
     3. **Tách Phí & Thuế**: Tách riêng ra khỏi số tiền gốc.
-    4. **Đảo Nợ/Có**: Ngân hàng C -> Sổ cái Debit. Ngân hàng D -> Sổ cái Credit.`;
+    4. **NGUYÊN TẮC ĐẢO DẤU (QUAN TRỌNG NHẤT)**:
+       - Tuyệt đối KHÔNG map theo tên cột (Credit -> credit là SAI).
+       - Phải map theo bản chất:
+         + Cột **"Ghi Có" / "Credit" / "Số tiền gửi"** (Tiền vào) -> JSON field **\`debit\`** (Nợ).
+         + Cột **"Ghi Nợ" / "Debit" / "Số tiền rút"** (Tiền ra) -> JSON field **\`credit\`** (Có).
+       - Ví dụ: Sao kê ghi "Credit: 16,000,000" -> JSON: { "debit": 16000000, "credit": 0 }`;
 
     const userPrompt = `Phân tích nội dung sao kê sau và trả về JSON chuẩn. Chú ý không bỏ sót giao dịch nào:\n\n${content.text}`;
 
     let result: GeminiResponse;
 
     try {
-        // Ưu tiên dùng DeepSeek
         const jsonString = await callDeepSeek([
             { role: "system", content: systemPrompt },
             { role: "user", content: userPrompt }
         ]);
-
         result = cleanAndParseJSON<GeminiResponse>(jsonString);
 
     } catch (error: any) {
         console.warn("DeepSeek Error, falling back to Gemini:", error);
-        if (error.message === "NO_DEEPSEEK_KEY" || error.message.includes("DeepSeek") || error.message.includes("JSON") || error.message.includes("Parse")) {
-            result = await processStatementWithGemini(content.text);
-        } else {
-             throw error;
-        }
+        // Fallback sang Gemini Safe Mode
+        result = await processStatementWithGemini(content.text);
     }
 
     // --- SORTING LOGIC ---
@@ -410,17 +425,28 @@ const chatResponseSchema = {
 const chatWithGemini = async (promptParts: any[]): Promise<AIChatResponse> => {
     console.log("Using Gemini Fallback for Chat...");
     const ai = getGeminiAI();
-    const modelRequest = {
-        model: "gemini-3-pro-preview",
-        contents: { parts: promptParts },
-        config: {
-            responseMimeType: "application/json",
-            responseSchema: chatResponseSchema,
-            temperature: 0.1,
-        },
+    const modelConfig = {
+        responseMimeType: "application/json",
+        responseSchema: chatResponseSchema,
+        temperature: 0.1,
     };
-    const response = await ai.models.generateContent(modelRequest);
-    return cleanAndParseJSON<AIChatResponse>(response.text);
+
+    try {
+        const response = await ai.models.generateContent({
+            model: "gemini-3-pro-preview",
+            contents: { parts: promptParts },
+            config: modelConfig,
+        });
+        return cleanAndParseJSON<AIChatResponse>(response.text);
+    } catch (error) {
+        console.warn("Gemini Pro Chat failed, trying Flash...", error);
+        const response = await ai.models.generateContent({
+            model: "gemini-2.5-flash",
+            contents: { parts: promptParts },
+            config: modelConfig,
+        });
+        return cleanAndParseJSON<AIChatResponse>(response.text);
+    }
 }
 
 /**
