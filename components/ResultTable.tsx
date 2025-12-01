@@ -24,7 +24,7 @@ const ResultTable: React.FC<ResultTableProps> = ({ accountInfo, transactions, op
     const recognitionRef = useRef<any>(null);
 
     useEffect(() => {
-        console.log("ResultTable Mounted - v2.4"); // Log for debugging cache
+        console.log("ResultTable Mounted - v1.0.7 Update"); 
         const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
         if (!SpeechRecognition) {
             console.warn("Speech Recognition not supported in this browser.");
@@ -101,11 +101,11 @@ const ResultTable: React.FC<ResultTableProps> = ({ accountInfo, transactions, op
     const { totalDebit, totalCredit, totalFee, totalVat, totalCalculatedCredit, calculatedEndingBalance } = useMemo(() => {
         const totals = transactions.reduce((acc, tx) => {
             acc.totalDebit += tx.debit;
-            acc.totalCredit += tx.credit; // Raw credit (Số tiền giao dịch)
+            acc.totalCredit += tx.credit; // Raw credit (Số tiền giao dịch gốc)
             acc.totalFee += tx.fee || 0;
             acc.totalVat += tx.vat || 0;
             
-            // Total PS Có (Mới) = Credit + Fee + Vat
+            // PS Có (Mới) = Credit + Fee + Vat
             const lineTotalCredit = tx.credit + (tx.fee || 0) + (tx.vat || 0);
             acc.totalCalculatedCredit += lineTotalCredit;
             
@@ -120,6 +120,7 @@ const ResultTable: React.FC<ResultTableProps> = ({ accountInfo, transactions, op
 
     const generateTableData = useCallback(() => {
         // Cập nhật Header cho CSV/Excel
+        // "Phát Sinh Có" là cột tổng (Calculated). "Số tiền giao dịch" là cột gốc (Credit).
         const headers = ["Mã GD", "Ngày giá trị", "Nội dung thanh toán", "Phát Sinh Nợ", "Phát Sinh Có", "Số tiền giao dịch", "Phí", "Thuế VAT", "Số dư"];
         let runningBalance = openingBalance;
         
@@ -141,6 +142,7 @@ const ResultTable: React.FC<ResultTableProps> = ({ accountInfo, transactions, op
 
         const initialRow = ['', '', 'Số dư đầu kỳ', '', '', '', '', '', openingBalance];
         
+        // Dòng tổng cộng
         const totalRow = ['', '', 'Cộng phát sinh', totalDebit, totalCalculatedCredit, totalCredit, totalFee, totalVat, calculatedEndingBalance];
 
         return { headers, rows: [initialRow, ...rows, totalRow] };

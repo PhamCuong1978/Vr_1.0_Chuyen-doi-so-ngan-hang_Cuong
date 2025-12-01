@@ -51,38 +51,34 @@ const getDeepSeekKey = () => {
 /**
  * Hàm này chịu trách nhiệm trích xuất chuỗi JSON hợp lệ từ phản hồi hỗn loạn của AI.
  * Nó tìm dấu { đầu tiên và dấu } cuối cùng để loại bỏ lời dẫn chuyện.
- * UPDATE: Xử lý cả trường hợp Markdown block ```json
  */
 const cleanAndParseJSON = <T>(text: string | undefined | null): T => {
     if (!text || typeof text !== 'string' || text.trim() === '') {
         throw new Error("AI trả về dữ liệu rỗng (Empty Response).");
     }
 
-    // 1. Loại bỏ Markdown code blocks (```json ... ```)
-    let cleanedText = text.replace(/```json\s*/g, "").replace(/```\s*/g, "");
-
     try {
-        // 2. Thử parse trực tiếp
-        return JSON.parse(cleanedText) as T;
+        // 1. Thử parse trực tiếp (nếu AI trả về JSON chuẩn)
+        return JSON.parse(text) as T;
     } catch (e) {
-        // 3. Nếu lỗi, thử trích xuất phần nằm giữa { ... } hoặc [ ... ]
+        // 2. Nếu lỗi, thử trích xuất phần nằm giữa { ... } hoặc [ ... ]
         // Tìm dấu mở { đầu tiên
-        const firstOpen = cleanedText.indexOf('{');
+        const firstOpen = text.indexOf('{');
         // Tìm dấu đóng } cuối cùng
-        const lastClose = cleanedText.lastIndexOf('}');
+        const lastClose = text.lastIndexOf('}');
 
         if (firstOpen !== -1 && lastClose !== -1 && lastClose > firstOpen) {
-            const jsonSubstring = cleanedText.substring(firstOpen, lastClose + 1);
+            const jsonSubstring = text.substring(firstOpen, lastClose + 1);
             try {
                 return JSON.parse(jsonSubstring) as T;
             } catch (e2) {
                 console.error("JSON Parse Error (Substring):", e2);
-                // 4. Cố gắng dọn dẹp thêm các ký tự điều khiển vô hình
-                const veryClean = jsonSubstring.replace(/[\u0000-\u001F\u007F-\u009F]/g, "");
+                // 3. Cố gắng dọn dẹp thêm các ký tự điều khiển vô hình
+                const cleaned = jsonSubstring.replace(/[\u0000-\u001F\u007F-\u009F]/g, "");
                 try {
-                     return JSON.parse(veryClean) as T;
+                     return JSON.parse(cleaned) as T;
                 } catch(e3) {
-                     throw new Error(`Không thể đọc cấu trúc JSON. Phản hồi AI bị lỗi cú pháp.`);
+                     throw new Error(`Không thể đọc cấu trúc JSON. Lỗi cú pháp: ${(e2 as Error).message}`);
                 }
             }
         }
@@ -92,17 +88,13 @@ const cleanAndParseJSON = <T>(text: string | undefined | null): T => {
     }
 };
 
-// --- HELPER: Call DeepSeek API with Timeout ---
+// --- HELPER: Call DeepSeek API ---
 const callDeepSeek = async (messages: any[], jsonMode: boolean = true) => {
     const apiKey = getDeepSeekKey();
     
     if (!apiKey) {
         throw new Error("NO_DEEPSEEK_KEY");
     }
-
-    // Tạo Controller để ngắt kết nối nếu quá lâu (60s)
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60000);
 
     try {
         const response = await fetch("https://api.deepseek.com/chat/completions", {
@@ -117,8 +109,7 @@ const callDeepSeek = async (messages: any[], jsonMode: boolean = true) => {
                 temperature: 0.1, // Low temp for logic
                 response_format: jsonMode ? { type: "json_object" } : { type: "text" },
                 stream: false
-            }),
-            signal: controller.signal
+            })
         });
 
         if (!response.ok) {
@@ -128,15 +119,9 @@ const callDeepSeek = async (messages: any[], jsonMode: boolean = true) => {
 
         const data = await response.json();
         return data.choices[0].message.content;
-    } catch (error: any) {
-        if (error.name === 'AbortError') {
-             console.warn("DeepSeek request timed out.");
-             throw new Error("DEEPSEEK_TIMEOUT");
-        }
+    } catch (error) {
         console.warn("DeepSeek Call Failed, switching to Fallback...", error);
         throw error;
-    } finally {
-        clearTimeout(timeoutId);
     }
 };
 
@@ -146,6 +131,7 @@ const callDeepSeek = async (messages: any[], jsonMode: boolean = true) => {
 export const extractTextFromContent = async (content: { images: { mimeType: string; data: string }[] }): Promise<string> => {
     if (content.images.length === 0) return '';
     
+    // FIX: Prompt được viết lại hoàn toàn để tránh lỗi vẽ bảng (hallucination)
     const prompt = `Bạn là công cụ OCR (Nhận dạng quang học) chính xác cao.
     
     NHIỆM VỤ:
@@ -175,7 +161,7 @@ export const extractTextFromContent = async (content: { images: { mimeType: stri
         const modelRequest = {
             model: "gemini-2.5-flash", // Flash cực nhanh và rẻ cho OCR
             contents: { parts: [{ text: prompt }, ...imageParts] },
-            config: { temperature: 0 } 
+            config: { temperature: 0 } // Nhiệt độ 0 để đảm bảo tính nhất quán cao nhất
         };
 
         const response = await ai.models.generateContent(modelRequest);
@@ -297,19 +283,22 @@ export const processStatement = async (content: { text: string; }): Promise<Gemi
             { role: "user", content: userPrompt }
         ]);
 
+        // FIX: Sử dụng hàm parse an toàn thay vì parse trực tiếp
         result = cleanAndParseJSON<GeminiResponse>(jsonString);
 
     } catch (error: any) {
-        console.warn("DeepSeek Error/Timeout, falling back to Gemini:", error);
-        // Fallback sang Gemini nếu DeepSeek lỗi, timeout hoặc không có key
-        if (error.message === "NO_DEEPSEEK_KEY" || error.message === "DEEPSEEK_TIMEOUT" || error.message.includes("DeepSeek") || error.message.includes("JSON")) {
+        console.warn("DeepSeek Error, falling back to Gemini:", error);
+        // Fallback sang Gemini nếu DeepSeek lỗi hoặc không có key
+        if (error.message === "NO_DEEPSEEK_KEY" || error.message.includes("DeepSeek") || error.message.includes("JSON")) {
             result = await processStatementWithGemini(content.text);
         } else {
              throw error;
         }
     }
 
-    // --- SORTING LOGIC: Sort transactions by date ascending ---
+    // --- SORTING LOGIC UPDATE V1.0.8 ---
+    // 1. Sắp xếp theo ngày tăng dần.
+    // 2. Nếu cùng ngày: Ưu tiên PS Nợ (Tiền vào) lên trước PS Có (Tiền ra) để tránh âm quỹ.
     if (result && result.transactions && Array.isArray(result.transactions)) {
         result.transactions.sort((a, b) => {
             const parseDate = (dateStr: string) => {
@@ -321,7 +310,23 @@ export const processStatement = async (content: { text: string; }): Promise<Gemi
                 }
                 return 0; 
             };
-            return parseDate(a.date) - parseDate(b.date);
+
+            const dateA = parseDate(a.date);
+            const dateB = parseDate(b.date);
+
+            // 1. So sánh ngày
+            if (dateA !== dateB) {
+                return dateA - dateB;
+            }
+
+            // 2. Nếu cùng ngày -> Check loại giao dịch (Debit trước, Credit sau)
+            const isDebitA = (a.debit || 0) > 0;
+            const isDebitB = (b.debit || 0) > 0;
+
+            if (isDebitA && !isDebitB) return -1; // A là Nợ (vào), B là Có (ra) -> A lên trước
+            if (!isDebitA && isDebitB) return 1;  // A là Có (ra), B là Nợ (vào) -> B lên trước
+
+            return 0; // Cùng loại
         });
     }
 
