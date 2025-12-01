@@ -1,44 +1,34 @@
 import { GoogleGenAI, Type } from "@google/genai";
-import type { GeminiResponse, AIChatResponse, ChatMessage } from '../types';
+import type { GeminiResponse, AIChatResponse, ChatMessage, Transaction } from '../types';
 
 // --- HELPER: Safe Env Getter ---
 const getEnvVar = (key: string): string | undefined => {
-    // 1. Thử lấy từ window.process (do index.tsx polyfill)
     if (typeof window !== 'undefined' && (window as any).process?.env?.[key]) {
         return (window as any).process.env[key];
     }
-    // 2. Thử lấy trực tiếp từ process (nếu môi trường hỗ trợ Node global)
     try {
         if (typeof process !== 'undefined' && process.env?.[key]) {
             return process.env[key];
         }
     } catch (e) {}
-
-    // 3. Thử lấy từ import.meta.env (Vite native) - fallback cuối
     try {
         const metaEnv = (import.meta as any).env;
         if (metaEnv) {
             return metaEnv[key] || metaEnv[`VITE_${key}`];
         }
     } catch (e) {}
-
     return undefined;
 };
 
 // --- CONFIGURATION ---
-// 1. Gemini Key (Dùng cho OCR hình ảnh & Fallback Logic)
 const getGeminiAI = () => {
     const apiKey = getEnvVar('API_KEY');
-    
-    // Kiểm tra kỹ hơn để tránh lỗi undefined hoặc key rỗng
     if (!apiKey || apiKey.trim() === "" || apiKey.includes("VITE_API_KEY")) {
-        throw new Error("Lỗi API Key: Không tìm thấy 'VITE_API_KEY'. Hãy kiểm tra Settings > Environment Variables trên Vercel.");
+        throw new Error("Lỗi API Key: Không tìm thấy 'VITE_API_KEY'.");
     }
-
     return new GoogleGenAI({ apiKey: apiKey });
 };
 
-// 2. DeepSeek Key (Dùng cho Logic Kế toán & Chat)
 const getDeepSeekKey = () => {
     const key = getEnvVar('DEEPSEEK_API_KEY');
     if (!key || key.trim() === "") {
@@ -47,103 +37,85 @@ const getDeepSeekKey = () => {
     return key;
 };
 
-// --- HELPER: JSON CLEANER & PARSER ---
-/**
- * Hàm này chịu trách nhiệm trích xuất chuỗi JSON hợp lệ từ phản hồi hỗn loạn của AI.
- * UPDATE v1.1.1: Xử lý triệt để lỗi định dạng số (1.000.000 -> 1000000) gây lỗi parse.
- */
+// --- HELPER: JSON CLEANER & PARSER (ROBUST v2) ---
 const cleanAndParseJSON = <T>(text: string | undefined | null): T => {
     if (!text || typeof text !== 'string' || text.trim() === '') {
         throw new Error("AI trả về dữ liệu rỗng (Empty Response).");
     }
 
-    // Helper: Thử parse và tự sửa lỗi nếu cần
-    const attemptParse = (jsonStr: string): T => {
-        try {
-            return JSON.parse(jsonStr) as T;
-        } catch (e) {
-            let fixedStr = jsonStr;
+    const repairSyntax = (str: string): string => {
+        let fixed = str;
+        fixed = fixed.replace(/```json/g, "").replace(/```/g, "");
+        fixed = fixed.replace(/\/\/.*$/gm, "");
+        fixed = fixed.replace(/}\s*{/g, "},{");
+        fixed = fixed.replace(/]\s*\[/g, "],[");
+        fixed = fixed.replace(/("\s*|\d+\s*|true\s*|false\s*|null\s*)\s+"([a-zA-Z0-9_]+":)/g, '$1,$2');
+        fixed = fixed.replace(/:\s*"?(\d{1,3}(\.\d{3})+)"?\s*(?=[,}])/g, (match, p1) => ":" + p1.replace(/\./g, ''));
+        fixed = fixed.replace(/,\s*([}\]])/g, "$1");
+        fixed = fixed.replace(/[\u0000-\u0019]+/g, "");
+        return fixed.trim();
+    };
 
-            // FIX 1: Loại bỏ comments (// ...)
-            fixedStr = fixedStr.replace(/\/\/.*$/gm, "");
+    const balanceBraces = (str: string): string => {
+        let openBraces = 0;
+        let openBrackets = 0;
+        let inString = false;
+        let escaped = false;
 
-            // FIX 2: Loại bỏ dấu "..." (Ellipses)
-            fixedStr = fixedStr.replace(/,?\s*\.\.\./g, "");
-
-            // FIX 3: Lỗi thiếu dấu phẩy giữa các object: "}{" -> "},{"
-            fixedStr = fixedStr.replace(/}\s*{/g, "},{");
-            fixedStr = fixedStr.replace(/]\s*\[/g, "],[");
-
-            // FIX 4: Lỗi thừa dấu phẩy cuối cùng: ",}" -> "}"
-            fixedStr = fixedStr.replace(/,(\s*[}\]])/g, "$1");
-            
-            // FIX 5: Lỗi định dạng số có dấu chấm phân cách (1.000.000) gây lỗi cú pháp JSON
-            fixedStr = fixedStr.replace(/:\s*(\d{1,3})(\.(\d{3}))+(\s*[,}\]])/g, (match, p1, group2, suffix) => {
-                const cleanNumber = match.replace(/\./g, '');
-                return cleanNumber;
-            });
-
-            // FIX 6: Xóa các ký tự điều khiển
-            fixedStr = fixedStr.replace(/[\u0000-\u0019]+/g, "");
-
-            if (fixedStr !== jsonStr) {
-                try {
-                    return JSON.parse(fixedStr) as T;
-                } catch (e2) {
-                    console.warn("Auto-fix JSON failed. Original error:", e);
-                    console.warn("Fix attempt error:", e2);
-                    throw e; 
-                }
+        for (let i = 0; i < str.length; i++) {
+            const char = str[i];
+            if (char === '\\' && !escaped) { escaped = true; continue; }
+            if (char === '"' && !escaped) { inString = !inString; }
+            escaped = false;
+            if (!inString) {
+                if (char === '{') openBraces++;
+                if (char === '}') openBraces--;
+                if (char === '[') openBrackets++;
+                if (char === ']') openBrackets--;
             }
-            throw e;
+        }
+        if (inString) str += '"';
+        while (openBraces > 0) { str += "}"; openBraces--; }
+        while (openBrackets > 0) { str += "]"; openBrackets--; }
+        return str;
+    };
+
+    const attemptParse = (raw: string): T => {
+        let currentStr = repairSyntax(raw);
+        try {
+            return JSON.parse(currentStr) as T;
+        } catch (e1) {
+            const firstOpen = currentStr.indexOf('{');
+            const lastClose = currentStr.lastIndexOf('}');
+            if (firstOpen !== -1 && lastClose > firstOpen) {
+                try {
+                    return JSON.parse(currentStr.substring(firstOpen, lastClose + 1)) as T;
+                } catch(e2) {}
+            }
+            if (firstOpen !== -1) {
+                try {
+                    let subStr = currentStr.substring(firstOpen);
+                    let balanced = balanceBraces(subStr);
+                    return JSON.parse(balanced) as T;
+                } catch (e3) {}
+            }
+            throw e1;
         }
     };
 
     try {
-        // 0. Pre-clean: Xóa các block markdown
-        let cleanText = text.replace(/```json/g, "").replace(/```/g, "");
-
-        // 1. Thử parse trực tiếp
-        return attemptParse(cleanText);
+        return attemptParse(text);
     } catch (e) {
-        // 2. Nếu lỗi, thử trích xuất phần nằm giữa { ... }
-        const firstOpen = text.indexOf('{');
-        const lastClose = text.lastIndexOf('}');
-
-        if (firstOpen !== -1 && lastClose !== -1 && lastClose > firstOpen) {
-            let jsonSubstring = text.substring(firstOpen, lastClose + 1);
-            jsonSubstring = jsonSubstring.replace(/[\u0000-\u001F\u007F-\u009F]/g, "");
-            
-            try {
-                return attemptParse(jsonSubstring);
-            } catch (e2) {
-                 const err = e2 as Error;
-                 console.error("JSON Parse Error (Substring):", err.message);
-                 
-                 const positionMatch = err.message.match(/position (\d+)/);
-                 if (positionMatch) {
-                     const pos = parseInt(positionMatch[1]);
-                     const start = Math.max(0, pos - 50);
-                     const end = Math.min(jsonSubstring.length, pos + 50);
-                     console.error("Error Context:", jsonSubstring.substring(start, end));
-                 }
-                 
-                 throw new Error(`Lỗi đọc dữ liệu AI: ${err.message}. (Hãy thử lại hoặc kiểm tra file đầu vào)`);
-            }
-        }
-        
-        console.error("Raw AI Text:", text);
-        throw new Error("Không tìm thấy cấu trúc JSON hợp lệ trong phản hồi của AI.");
+        const err = e as Error;
+        console.error("Final JSON Parse Error:", err.message);
+        throw new Error(`Lỗi đọc dữ liệu AI: ${err.message}.`);
     }
 };
 
 // --- HELPER: Call DeepSeek API ---
 const callDeepSeek = async (messages: any[], jsonMode: boolean = true) => {
     const apiKey = getDeepSeekKey();
-    
-    if (!apiKey) {
-        throw new Error("NO_DEEPSEEK_KEY");
-    }
+    if (!apiKey) throw new Error("NO_DEEPSEEK_KEY");
 
     try {
         const response = await fetch("https://api.deepseek.com/chat/completions", {
@@ -153,11 +125,12 @@ const callDeepSeek = async (messages: any[], jsonMode: boolean = true) => {
                 "Authorization": `Bearer ${apiKey}`
             },
             body: JSON.stringify({
-                model: "deepseek-chat", // DeepSeek V3
+                model: "deepseek-chat",
                 messages: messages,
-                temperature: 0.1, // Low temp for logic
+                temperature: 0.1,
                 response_format: jsonMode ? { type: "json_object" } : { type: "text" },
-                stream: false
+                stream: false,
+                max_tokens: 8000
             })
         });
 
@@ -174,53 +147,25 @@ const callDeepSeek = async (messages: any[], jsonMode: boolean = true) => {
     }
 };
 
-/**
- * Step 1: Extracts raw text from images using GEMINI FLASH (Best for OCR/Vision).
- */
 export const extractTextFromContent = async (content: { images: { mimeType: string; data: string }[] }): Promise<string> => {
     if (content.images.length === 0) return '';
-    
-    const prompt = `Bạn là công cụ OCR (Nhận dạng quang học) chính xác cao.
-    
-    NHIỆM VỤ:
-    Đọc và chép lại toàn bộ văn bản, con số xuất hiện trong các hình ảnh sao kê ngân hàng này.
-
-    QUY TẮC BẮT BUỘC (TUÂN THỦ NGHIÊM NGẶT):
-    1. **RAW TEXT ONLY (CHỈ VĂN BẢN THÔ)**: Xuất ra kết quả dưới dạng từng dòng văn bản.
-    2. **KHÔNG KẺ BẢNG**: Tuyệt đối KHÔNG sử dụng Markdown Table.
-    3. **KHÔNG TÓM TẮT**: Đọc thấy gì viết nấy.
-    4. **GIỮ NGUYÊN SỐ LIỆU**: Không làm tròn số, giữ nguyên dấu chấm/phẩy của số tiền gốc.
-    5. Thứ tự đọc: Từ trái sang phải, từ trên xuống dưới.
-
-    Ví dụ output mong muốn:
-    01/01/2023 MBVC - Tra luong thang 1 10.000.000 VND
-    02/01/2023 123456 Rut tien mat 500.000
-    ...`;
-
+    const prompt = `Bạn là công cụ OCR. Đọc toàn bộ văn bản trong ảnh. Giữ nguyên số liệu.`;
     try {
         const ai = getGeminiAI();
-        const imageParts = content.images.map(img => ({
-            inlineData: {
-                mimeType: img.mimeType,
-                data: img.data,
-            }
-        }));
-
+        const imageParts = content.images.map(img => ({ inlineData: { mimeType: img.mimeType, data: img.data } }));
         const modelRequest = {
             model: "gemini-2.5-flash", 
             contents: { parts: [{ text: prompt }, ...imageParts] },
             config: { temperature: 0 }
         };
-
         const response = await ai.models.generateContent(modelRequest);
         return (response.text || '').trim();
     } catch (error) {
-        console.error("OCR Failed:", error);
         throw error;
     }
 }
 
-// --- GEMINI FALLBACK LOGIC (IMPROVED STABILITY) ---
+// --- CORE: GEMINI FALLBACK LOGIC ---
 const responseSchema = {
   type: Type.OBJECT,
   properties: {
@@ -228,275 +173,205 @@ const responseSchema = {
     endingBalance: { type: Type.NUMBER },
     accountInfo: {
       type: Type.OBJECT,
-      properties: {
-        accountName: { type: Type.STRING },
-        accountNumber: { type: Type.STRING },
-        bankName: { type: Type.STRING },
-        branch: { type: Type.STRING },
-      },
+      properties: { accountName: { type: Type.STRING }, accountNumber: { type: Type.STRING }, bankName: { type: Type.STRING }, branch: { type: Type.STRING } },
       required: ["accountName", "accountNumber", "bankName", "branch"],
     },
     transactions: {
       type: Type.ARRAY,
       items: {
         type: Type.OBJECT,
-        properties: {
-          transactionCode: { type: Type.STRING },
-          date: { type: Type.STRING },
-          description: { type: Type.STRING },
-          debit: { type: Type.NUMBER },
-          credit: { type: Type.NUMBER },
-          fee: { type: Type.NUMBER },
-          vat: { type: Type.NUMBER },
-        },
+        properties: { transactionCode: { type: Type.STRING }, date: { type: Type.STRING }, description: { type: Type.STRING }, debit: { type: Type.NUMBER }, credit: { type: Type.NUMBER }, fee: { type: Type.NUMBER }, vat: { type: Type.NUMBER } },
         required: ["date", "description", "debit", "credit"],
       },
     },
   },
-  required: ["accountInfo", "transactions", "openingBalance", "endingBalance"],
+  required: ["accountInfo", "transactions"],
 };
 
-// UPDATE: Tách hàm gọi API để xử lý fallback
-const processStatementWithGemini = async (text: string): Promise<GeminiResponse> => {
-    console.log("Using Gemini Fallback for Processing...");
+const processStatementWithGemini = async (text: string, isPartial: boolean = false): Promise<GeminiResponse> => {
     const ai = getGeminiAI();
+    const prompt = `Bạn là chuyên gia kế toán. Xử lý phần văn bản sao kê này thành JSON.
+    ${isPartial ? 'LƯU Ý: Đây chỉ là một phần của sao kê dài. Hãy tập trung trích xuất Giao dịch. Nếu không thấy thông tin tài khoản hoặc số dư đầu kỳ/cuối kỳ ở phần này, hãy trả về 0 hoặc chuỗi rỗng.' : ''}
     
-    // UPDATE: Thêm quy tắc đảo ngược Nợ/Có rõ ràng
-    const prompt = `Bạn là chuyên gia kế toán. Xử lý văn bản sao kê thô sau thành JSON.
-    QUY TẮC AN TOÀN (CHỐNG MẤT DỮ LIỆU):
-    1. Rà soát từng dòng văn bản. Nếu dòng đó có chứa NGÀY THÁNG (DD/MM/YYYY) và SỐ TIỀN -> Đó là một giao dịch. BẮT BUỘC PHẢI LẤY.
-    2. Tách phí/thuế ra khỏi giao dịch gốc.
+    QUY TẮC ĐẢO NGƯỢC NỢ/CÓ:
+    - Sao kê ghi "Có" (Credit/Tiền vào) -> JSON 'debit'.
+    - Sao kê ghi "Nợ" (Debit/Tiền ra) -> JSON 'credit'.
     
-    QUY TẮC ĐẢO NGƯỢC NỢ/CÓ (BẮT BUỘC PHẢI TUÂN THỦ):
-    - Sao kê ghi "Có" (Credit/Tiền vào) -> JSON điền vào trường 'debit'.
-    - Sao kê ghi "Nợ" (Debit/Tiền ra) -> JSON điền vào trường 'credit'.
-    - Ví dụ: Dòng "17/01 ... Ghi Có 16.000.000" -> { "debit": 16000000, "credit": 0 }
-    
-    QUAN TRỌNG VỀ ĐỊNH DẠNG SỐ:
-    - Các trường tiền tệ (debit, credit, fee, vat) bắt buộc phải là kiểu NUMBER chuẩn.
-    - KHÔNG ĐƯỢC dùng dấu chấm (.) hoặc phẩy (,) để phân cách hàng nghìn.
-    - SAI: 1.000.000 -> ĐÚNG: 1000000
+    ĐỊNH DẠNG SỐ: Number chuẩn (1000000), KHÔNG dùng dấu chấm/phẩy phân cách.
     
     Nội dung: ${text}`;
 
-    // --- STRATEGY: TRY PRO, IF FAIL (500), FALLBACK TO FLASH ---
     try {
-        console.log("Attempting with Gemini Pro (High IQ)...");
         const response = await ai.models.generateContent({
             model: "gemini-3-pro-preview", 
             contents: prompt,
-            config: {
-                responseMimeType: "application/json",
-                responseSchema: responseSchema,
-                temperature: 0,
-            },
+            config: { responseMimeType: "application/json", responseSchema: responseSchema, temperature: 0 },
         });
         return cleanAndParseJSON<GeminiResponse>(response.text);
-
-    } catch (error: any) {
-        console.warn("Gemini Pro failed (likely 500 or timeout). Switching to Gemini Flash (High Stability)...", error);
-        
-        // Fallback Call
+    } catch (error) {
         const responseFallback = await ai.models.generateContent({
-            model: "gemini-2.5-flash", // Stable version
+            model: "gemini-2.5-flash", 
             contents: prompt,
-            config: {
-                responseMimeType: "application/json",
-                responseSchema: responseSchema,
-                temperature: 0,
-            },
+            config: { responseMimeType: "application/json", responseSchema: responseSchema, temperature: 0 },
         });
         return cleanAndParseJSON<GeminiResponse>(responseFallback.text);
     }
 };
 
 /**
- * Step 2: Processes the extracted text using DEEPSEEK V3 (with Gemini Fallback).
+ * Xử lý một phần (chunk) dữ liệu.
  */
-export const processStatement = async (content: { text: string; }): Promise<GeminiResponse> => {
-    // UPDATE: Cập nhật System Prompt với luật đảo ngược mạnh mẽ hơn
-    const systemPrompt = `Bạn là Chuyên gia Kế toán Cao cấp (ACCAR). Nhiệm vụ: Chuyển đổi văn bản sao kê ngân hàng thô thành JSON cấu trúc sổ cái.
+export const processStatement = async (content: { text: string; }, isPartial: boolean = false): Promise<GeminiResponse> => {
+    const systemPrompt = `Bạn là Chuyên gia Kế toán (ACCAR). Chuyển đổi sao kê thành JSON.
+    ${isPartial ? 'LƯU Ý: Đây là một phần dữ liệu được cắt nhỏ. Hãy trích xuất tối đa giao dịch tìm thấy. Nếu thiếu Header (Tên TK) hoặc Footer (Số dư), hãy để trống.' : ''}
 
-    CẤU TRÚC JSON BẮT BUỘC (RESPONSE SCHEMA):
+    SCHEMA JSON:
     {
-        "openingBalance": number, // Số dư đầu kỳ (tìm kỹ, mặc định 0)
-        "endingBalance": number, // Số dư cuối kỳ (tìm kỹ, mặc định 0)
-        "accountInfo": {
-            "accountName": string,
-            "accountNumber": string,
-            "bankName": string,
-            "branch": string
-        },
+        "openingBalance": number, // Default 0
+        "endingBalance": number, // Default 0
+        "accountInfo": { "accountName": "", "accountNumber": "", "bankName": "", "branch": "" },
         "transactions": [
-            {
-                "transactionCode": string,
-                "date": string, // DD/MM/YYYY
-                "description": string,
-                "debit": number, // Tiền vào
-                "credit": number, // Tiền ra GỐC. KHÔNG bao gồm phí/thuế.
-                "fee": number, // Phí giao dịch tách riêng
-                "vat": number // Thuế tách riêng
-            }
+            { "transactionCode": "...", "date": "DD/MM/YYYY", "description": "No newline", "debit": 0, "credit": 0, "fee": 0, "vat": 0 }
         ]
     }
 
-    QUY TẮC NGHIỆP VỤ & CHỐNG LỖI (QUAN TRỌNG):
-    1. **QUÉT TOÀN BỘ**: Đọc kỹ từng dòng. Nếu thấy ngày tháng và số tiền -> Chắc chắn là giao dịch.
-    2. **ĐỊNH DẠNG SỐ TUYỆT ĐỐI**: Các trường tiền tệ PHẢI là số thuần (1000000). TUYỆT ĐỐI KHÔNG dùng dấu chấm/phẩy phân cách hàng nghìn.
-    3. **Tách Phí & Thuế**: Tách riêng ra khỏi số tiền gốc.
-    4. **NGUYÊN TẮC ĐẢO DẤU (QUAN TRỌNG NHẤT)**:
-       - Tuyệt đối KHÔNG map theo tên cột (Credit -> credit là SAI).
-       - Phải map theo bản chất:
-         + Cột **"Ghi Có" / "Credit" / "Số tiền gửi"** (Tiền vào) -> JSON field **\`debit\`** (Nợ).
-         + Cột **"Ghi Nợ" / "Debit" / "Số tiền rút"** (Tiền ra) -> JSON field **\`credit\`** (Có).
-       - Ví dụ: Sao kê ghi "Credit: 16,000,000" -> JSON: { "debit": 16000000, "credit": 0 }`;
+    QUY TẮC VÀNG:
+    1. 1000000 (Không chấm phẩy).
+    2. Ngân hàng Credit -> Sổ cái debit. Ngân hàng Debit -> Sổ cái credit.
+    3. Không bỏ sót giao dịch nào trong đoạn văn bản này.`;
 
-    const userPrompt = `Phân tích nội dung sao kê sau và trả về JSON chuẩn. Chú ý không bỏ sót giao dịch nào:\n\n${content.text}`;
-
-    let result: GeminiResponse;
+    const userPrompt = `Dữ liệu sao kê (Phần ${isPartial ? 'cắt nhỏ' : 'đầy đủ'}):\n\n${content.text}`;
 
     try {
         const jsonString = await callDeepSeek([
             { role: "system", content: systemPrompt },
             { role: "user", content: userPrompt }
         ]);
-        result = cleanAndParseJSON<GeminiResponse>(jsonString);
-
+        return cleanAndParseJSON<GeminiResponse>(jsonString);
     } catch (error: any) {
-        console.warn("DeepSeek Error, falling back to Gemini:", error);
-        // Fallback sang Gemini Safe Mode
-        result = await processStatementWithGemini(content.text);
+        return await processStatementWithGemini(content.text, isPartial);
     }
-
-    // --- SORTING LOGIC ---
-    if (result && result.transactions && Array.isArray(result.transactions)) {
-        result.transactions.sort((a, b) => {
-            const parseDate = (dateStr: string) => {
-                if (!dateStr) return 0;
-                const parts = dateStr.split('/');
-                if (parts.length === 3) {
-                    return new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0])).getTime();
-                }
-                return 0; 
-            };
-
-            const dateA = parseDate(a.date);
-            const dateB = parseDate(b.date);
-
-            if (dateA !== dateB) return dateA - dateB;
-
-            const isDebitA = (a.debit || 0) > 0;
-            const isDebitB = (b.debit || 0) > 0;
-
-            if (isDebitA && !isDebitB) return -1;
-            if (!isDebitA && isDebitB) return 1;
-
-            return 0; 
-        });
-    }
-
-    return result;
 };
 
-// --- GEMINI CHAT FALLBACK ---
+/**
+ * MỚI: Hàm Quản lý Xử lý Hàng loạt (Batch Processing Manager)
+ * Nhận vào danh sách các chunks (Text hoặc Image Base64) và xử lý tuần tự.
+ */
+export const processBatchData = async (
+    chunks: { type: 'text' | 'image', data: string }[],
+    onProgress: (current: number, total: number) => void
+): Promise<GeminiResponse> => {
+    
+    let combinedTransactions: Transaction[] = [];
+    let finalAccountInfo = { accountName: '', accountNumber: '', bankName: '', branch: '' };
+    let finalOpeningBalance = 0;
+    let finalEndingBalance = 0;
+    let foundAccountInfo = false;
+    let foundOpening = false;
+
+    for (let i = 0; i < chunks.length; i++) {
+        onProgress(i + 1, chunks.length); // Cập nhật tiến trình
+        const chunk = chunks[i];
+        let result: GeminiResponse;
+
+        try {
+            if (chunk.type === 'text') {
+                result = await processStatement({ text: chunk.data }, true);
+            } else {
+                // Nếu là ảnh, OCR trước rồi mới process, hoặc gửi ảnh trực tiếp cho Gemini Vision (tối ưu hơn)
+                // Ở đây ta dùng cách an toàn: OCR text -> Process Text để thống nhất logic
+                const text = await extractTextFromContent({ images: [{ mimeType: 'image/jpeg', data: chunk.data }] });
+                result = await processStatement({ text: text }, true);
+            }
+
+            // --- MERGING LOGIC (GỘP DỮ LIỆU) ---
+            
+            // 1. Gộp giao dịch
+            if (result.transactions && Array.isArray(result.transactions)) {
+                combinedTransactions = [...combinedTransactions, ...result.transactions];
+            }
+
+            // 2. Lấy thông tin tài khoản (Ưu tiên chunk đầu tiên hoặc chunk nào có dữ liệu đầy đủ)
+            if (!foundAccountInfo && result.accountInfo && result.accountInfo.accountNumber) {
+                finalAccountInfo = result.accountInfo;
+                foundAccountInfo = true;
+            }
+
+            // 3. Lấy số dư đầu kỳ (Thường ở chunk đầu)
+            if (!foundOpening && result.openingBalance !== undefined && result.openingBalance !== 0) {
+                finalOpeningBalance = result.openingBalance;
+                foundOpening = true;
+            }
+
+            // 4. Lấy số dư cuối kỳ (Cập nhật liên tục, lấy giá trị của chunk cuối cùng tìm thấy)
+            if (result.endingBalance !== undefined && result.endingBalance !== 0) {
+                finalEndingBalance = result.endingBalance;
+            }
+
+        } catch (err) {
+            console.error(`Lỗi xử lý phần ${i + 1}:`, err);
+            // Không throw lỗi chết chương trình, chỉ log và tiếp tục các phần khác
+        }
+    }
+
+    // Sort lại toàn bộ giao dịch sau khi gộp
+    combinedTransactions.sort((a, b) => {
+        const parseDate = (dateStr: string) => {
+            if (!dateStr) return 0;
+            const parts = dateStr.split('/');
+            return parts.length === 3 ? new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0])).getTime() : 0;
+        };
+        return parseDate(a.date) - parseDate(b.date);
+    });
+
+    return {
+        accountInfo: finalAccountInfo,
+        transactions: combinedTransactions,
+        openingBalance: finalOpeningBalance,
+        endingBalance: finalEndingBalance
+    };
+};
+
+// --- CHAT (Giữ nguyên) ---
 const chatResponseSchema = {
     type: Type.OBJECT,
     properties: {
         responseText: { type: Type.STRING },
         action: { type: Type.STRING },
-        update: {
-            type: Type.OBJECT,
-            nullable: true,
-            properties: { index: { type: Type.NUMBER }, field: { type: Type.STRING }, newValue: { type: Type.NUMBER } },
-        },
-        add: {
-            type: Type.OBJECT,
-            nullable: true,
-            properties: {
-                transactionCode: { type: Type.STRING }, date: { type: Type.STRING }, description: { type: Type.STRING },
-                debit: { type: Type.NUMBER }, credit: { type: Type.NUMBER }, fee: { type: Type.NUMBER }, vat: { type: Type.NUMBER },
-            },
-        },
+        update: { type: Type.OBJECT, nullable: true, properties: { index: { type: Type.NUMBER }, field: { type: Type.STRING }, newValue: { type: Type.NUMBER } } },
+        add: { type: Type.OBJECT, nullable: true, properties: { transactionCode: { type: Type.STRING }, date: { type: Type.STRING }, description: { type: Type.STRING }, debit: { type: Type.NUMBER }, credit: { type: Type.NUMBER }, fee: { type: Type.NUMBER }, vat: { type: Type.NUMBER } } },
         confirmationRequired: { type: Type.BOOLEAN, nullable: true },
     },
     required: ["responseText", "action"],
 };
 
 const chatWithGemini = async (promptParts: any[]): Promise<AIChatResponse> => {
-    console.log("Using Gemini Fallback for Chat...");
     const ai = getGeminiAI();
-    const modelConfig = {
-        responseMimeType: "application/json",
-        responseSchema: chatResponseSchema,
-        temperature: 0.1,
-    };
-
     try {
         const response = await ai.models.generateContent({
-            model: "gemini-3-pro-preview",
-            contents: { parts: promptParts },
-            config: modelConfig,
+            model: "gemini-3-pro-preview", contents: { parts: promptParts },
+            config: { responseMimeType: "application/json", responseSchema: chatResponseSchema, temperature: 0.1 },
         });
         return cleanAndParseJSON<AIChatResponse>(response.text);
     } catch (error) {
-        console.warn("Gemini Pro Chat failed, trying Flash...", error);
         const response = await ai.models.generateContent({
-            model: "gemini-2.5-flash",
-            contents: { parts: promptParts },
-            config: modelConfig,
+            model: "gemini-2.5-flash", contents: { parts: promptParts },
+            config: { responseMimeType: "application/json", responseSchema: chatResponseSchema, temperature: 0.1 },
         });
         return cleanAndParseJSON<AIChatResponse>(response.text);
     }
 }
 
-/**
- * Chat Assistant using DEEPSEEK V3 (with Gemini Fallback).
- */
-export const chatWithAI = async (
-    message: string,
-    currentReport: GeminiResponse,
-    chatHistory: ChatMessage[],
-    rawStatementContent: string,
-    image: { mimeType: string; data: string } | null
-): Promise<AIChatResponse> => {
-
-    const systemPrompt = `Bạn là "Trợ lý Kế toán của Anh Cường".
-    1. Luôn xưng "Em", gọi "Anh Cường".
-    2. Trả về JSON theo schema.
-    3. QUAN TRỌNG: Khi đề xuất sửa đổi số liệu, 'newValue' phải là SỐ THUẦN (ví dụ: 500000), KHÔNG được có dấu chấm/phẩy phân cách (ví dụ: KHÔNG 500.000).
-
-    Dữ liệu JSON hiện tại (đã xử lý): ${JSON.stringify(currentReport)}
-    
-    Dữ liệu gốc (OCR Text):
-    -----------------------------------
-    ${rawStatementContent}
-    -----------------------------------
-    `;
-
+export const chatWithAI = async (message: string, currentReport: GeminiResponse, chatHistory: ChatMessage[], rawStatementContent: string, image: { mimeType: string; data: string } | null): Promise<AIChatResponse> => {
+    const systemPrompt = `Bạn là Trợ lý Kế toán. Trả về JSON. Dữ liệu: ${JSON.stringify(currentReport)}`;
     try {
-        if (image) {
-            throw new Error("IMAGE_DETECTED");
-        }
-
-        const formattedHistory = chatHistory.map(msg => ({
-            role: msg.role === 'model' ? 'assistant' : 'user',
-            content: msg.content
-        }));
-
-        const jsonString = await callDeepSeek([
-            { role: "system", content: systemPrompt },
-            ...formattedHistory,
-            { role: "user", content: message }
-        ], true);
-
+        if (image) throw new Error("IMAGE_DETECTED");
+        const formattedHistory = chatHistory.map(msg => ({ role: msg.role === 'model' ? 'assistant' : 'user', content: msg.content }));
+        const jsonString = await callDeepSeek([{ role: "system", content: systemPrompt }, ...formattedHistory, { role: "user", content: message }], true);
         return cleanAndParseJSON<AIChatResponse>(jsonString);
-
     } catch (error: any) {
-        const geminiPromptParts: any[] = [{ text: systemPrompt + `\nLịch sử chat: ${JSON.stringify(chatHistory)}\nYêu cầu: ${message}` }];
-        if (image) {
-            geminiPromptParts.push({ text: "Hình ảnh đính kèm:" });
-            geminiPromptParts.push({ inlineData: { mimeType: image.mimeType, data: image.data } });
-        }
+        const geminiPromptParts: any[] = [{ text: systemPrompt + `\nChat: ${JSON.stringify(chatHistory)}\nUser: ${message}` }];
+        if (image) geminiPromptParts.push({ inlineData: { mimeType: image.mimeType, data: image.data } });
         return await chatWithGemini(geminiPromptParts);
     }
 };

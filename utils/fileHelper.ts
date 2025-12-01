@@ -1,8 +1,8 @@
+
 // Helper to extract text or images from various file types
 export const extractFromFile = async (file: File): Promise<{ text: string | null; images: { mimeType: string; data: string }[] }> => {
     return new Promise((resolve, reject) => {
         // --- TỐI ƯU HÓA 1: Đọc ảnh trực tiếp bằng DataURL (Nhanh & Nhẹ) ---
-        // Phiên bản cũ dùng readAsArrayBuffer + reduce gây treo máy với ảnh lớn.
         if (file.type.startsWith('image/')) {
             const reader = new FileReader();
             reader.onload = (e) => {
@@ -32,12 +32,16 @@ export const extractFromFile = async (file: File): Promise<{ text: string | null
                     const pdf = await (window as any).pdfjsLib.getDocument({ data: content }).promise;
                     const pageImages: { mimeType: string, data: string }[] = [];
                     
-                    // Giới hạn 10 trang đầu để tránh treo nếu PDF quá dài
-                    const maxPages = Math.min(pdf.numPages, 10);
+                    // --- CẬP NHẬT v1.1.6: Xử lý TOÀN BỘ trang (Không giới hạn) ---
+                    const totalPages = pdf.numPages;
+                    console.log(`Bắt đầu tách ${totalPages} trang từ file PDF...`);
                     
-                    for (let i = 1; i <= maxPages; i++) {
+                    for (let i = 1; i <= totalPages; i++) {
+                        // Thêm độ trễ cực nhỏ (10ms) để nhường luồng cho UI cập nhật (tránh treo trình duyệt với file lớn)
+                        await new Promise(resolve => setTimeout(resolve, 10));
+
                         const page = await pdf.getPage(i);
-                        // Scale 2.0 đủ nét cho OCR, 3.5 như bản cũ quá tốn RAM
+                        // Scale 2.0 đủ nét cho OCR
                         const viewport = page.getViewport({ scale: 2.0 }); 
                         const canvas = document.createElement('canvas');
                         const context = canvas.getContext('2d');
@@ -53,6 +57,7 @@ export const extractFromFile = async (file: File): Promise<{ text: string | null
                         const base64Data = dataUrl.split(',')[1];
                         pageImages.push({ mimeType: 'image/jpeg', data: base64Data });
                     }
+                    console.log(`Đã tách xong ${pageImages.length} trang.`);
                     resolve({ text: null, images: pageImages });
 
                 } else { 
