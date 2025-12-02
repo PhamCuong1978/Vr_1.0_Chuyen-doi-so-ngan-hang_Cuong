@@ -13,20 +13,17 @@ type UploadState = 'idle' | 'uploading' | 'completed';
 
 export default function App() {
     const [openingBalance, setOpeningBalance] = useState('');
-    // Lưu trữ text thô để hiện preview
     const [statementContent, setStatementContent] = useState<string>(() => localStorage.getItem('statementContent') || '');
-    // MỚI: Lưu trữ danh sách các phần tử đã trích xuất để gửi đi xử lý (Text chunks hoặc Image List)
     const [processedChunks, setProcessedChunks] = useState<{ type: 'text' | 'image', data: string }[]>([]);
     
     const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
     
-    // State cho quy trình Upload
     const [uploadState, setUploadState] = useState<UploadState>('idle');
     const [uploadProgress, setUploadProgress] = useState(0);
 
     const [loadingState, setLoadingState] = useState<LoadingState>('idle');
     const [progress, setProgress] = useState(0);
-    const [processingStatus, setProcessingStatus] = useState<string>(''); // Hiển thị chi tiết: "Đang xử lý phần 1/5"
+    const [processingStatus, setProcessingStatus] = useState<string>(''); 
 
     const [error, setError] = useState<string | null>(null);
     const [result, setResult] = useState<GeminiResponse | null>(null);
@@ -42,7 +39,7 @@ export default function App() {
     }, [statementContent]);
 
     useEffect(() => {
-        console.log(`App Version ${CURRENT_VERSION} Loaded`);
+        console.log(`App Version ${CURRENT_VERSION} Loaded - DeepSeek Edition`);
         return () => {
             if (uploadInterval.current) clearInterval(uploadInterval.current);
         };
@@ -118,7 +115,7 @@ export default function App() {
         
         setLoadingState('extracting');
         setError(null);
-        setProcessingStatus(hasImagesOrPDF ? "Đang tách trang PDF/Ảnh..." : "Đang đọc & Chia nhỏ văn bản...");
+        setProcessingStatus(hasImagesOrPDF ? "Đang tách trang PDF/Ảnh (OCR)..." : "Đang đọc & Chia nhỏ văn bản...");
         
         try {
             const extractionPromises = selectedFiles.map((file: File) => extractFromFile(file));
@@ -129,33 +126,26 @@ export default function App() {
 
             for (const res of results) {
                 if (res.images.length > 0) {
-                    // TRƯỜNG HỢP 1: PDF hoặc Ảnh -> Chia theo trang/ảnh (Đã xử lý không giới hạn ở fileHelper)
+                    // PDF/Image -> Chunks (DeepSeek ko đọc dc ảnh -> phải qua OCR trước)
                     res.images.forEach(img => {
                         allChunks.push({ type: 'image', data: img.data });
                     });
-                    fullPreviewText += `[Đã tải ${res.images.length} trang hình ảnh/PDF]\n`;
+                    fullPreviewText += `[Đã tải ${res.images.length} trang hình ảnh/PDF - Sẽ dùng OCR]\n`;
                 } else if (res.text) {
-                    // TRƯỜNG HỢP 2: Text/Excel -> Chia nhỏ theo 20 dòng, không giới hạn số lượng
+                    // Text/Excel -> Chunks
                     fullPreviewText += res.text + '\n\n';
-                    
-                    // Split theo dòng (Hỗ trợ cả \n và \r\n)
                     const lines = res.text.split(/\r?\n/);
-                    
                     const CHUNK_SIZE = 20; 
-                    const HEADER_ROWS = 5; // Giữ 5 dòng đầu làm Header ngữ cảnh (Tên TK, Số TK thường nằm ở đây)
-
+                    const HEADER_ROWS = 5; 
                     const header = lines.slice(0, HEADER_ROWS).join('\n');
-                    const body = lines.slice(HEADER_ROWS); // Toàn bộ phần còn lại là dữ liệu cần xử lý
+                    const body = lines.slice(HEADER_ROWS); 
 
                     if (body.length === 0) {
-                         // File quá ngắn, gửi cả cục
                          allChunks.push({ type: 'text', data: res.text });
                     } else {
-                        // Vòng lặp chia nhỏ toàn bộ Body thành các phần 20 dòng
                         for (let i = 0; i < body.length; i += CHUNK_SIZE) {
                             const chunkBody = body.slice(i, i + CHUNK_SIZE).join('\n');
-                            // Ghép Header + Chunk Body để AI không bị mất ngữ cảnh tài khoản
-                            const chunkContent = `--- CONTEXT HEADER (NOT TRANSACTION) ---\n${header}\n--- DATA PART ${Math.floor(i/CHUNK_SIZE) + 1} ---\n${chunkBody}`;
+                            const chunkContent = `--- CONTEXT HEADER ---\n${header}\n--- DATA PART ${Math.floor(i/CHUNK_SIZE) + 1} ---\n${chunkBody}`;
                             allChunks.push({ type: 'text', data: chunkContent });
                         }
                     }
@@ -189,23 +179,20 @@ export default function App() {
         setBalanceMismatchWarning(null);
         setHistory([]); 
         
-        // Reset tiến trình
         setProgress(0);
-        setProcessingStatus(`Chuẩn bị xử lý ${processedChunks.length} phần dữ liệu...`);
+        setProcessingStatus(`Chuẩn bị gửi dữ liệu tới DeepSeek...`);
 
         try {
-            // Gọi hàm xử lý Batch từ Service
             const data = await processBatchData(processedChunks, (current, total) => {
                 const percent = Math.round((current / total) * 100);
                 setProgress(percent);
-                setProcessingStatus(`Đang xử lý phần ${current}/${total} (${percent}%)`);
+                setProcessingStatus(`DeepSeek đang xử lý phần ${current}/${total} (${percent}%)`);
             });
             
             setOpeningBalance(data.openingBalance?.toString() ?? '0');
             setResult(data);
             setHistory([data]);
 
-            // Balance Cross-Check
             if (data.endingBalance !== undefined && data.endingBalance !== 0) {
                 const { totalDebit, totalCredit, totalFee, totalVat } = data.transactions.reduce((acc, tx) => {
                     acc.totalDebit += tx.debit;
@@ -219,7 +206,7 @@ export default function App() {
                 const calculatedEndingBalance = openingBal + totalDebit - totalCredit - totalFee - totalVat;
                 
                 if (Math.abs(calculatedEndingBalance - data.endingBalance) > 1) { 
-                    setBalanceMismatchWarning(`Số dư cuối kỳ tính toán (${formatCurrency(calculatedEndingBalance)}) không khớp với số dư trên sao kê (${formatCurrency(data.endingBalance)}). Chênh lệch: ${formatCurrency(calculatedEndingBalance - data.endingBalance)}.`);
+                    setBalanceMismatchWarning(`Số dư cuối kỳ tính toán (${formatCurrency(calculatedEndingBalance)}) không khớp với số dư trên sao kê (${formatCurrency(data.endingBalance)}).`);
                 }
             }
 
@@ -227,7 +214,7 @@ export default function App() {
             if (err instanceof Error) {
                 setError(err.message);
             } else {
-                setError('Đã xảy ra lỗi không xác định khi xử lý sao kê.');
+                setError('Đã xảy ra lỗi không xác định.');
             }
         } finally {
             setLoadingState('idle');
@@ -302,7 +289,7 @@ export default function App() {
             }, { totalDebit: 0, totalCredit: 0, totalFee: 0, totalVat: 0 });
             const calculatedEndingBalance = (parseFloat(openingBalance) || 0) + totalDebit - totalCredit - totalFee - totalVat;
             if (Math.abs(calculatedEndingBalance - extractedEndingBalance) > 1) {
-                setBalanceMismatchWarning(`Số dư cuối kỳ tính toán (${formatCurrency(calculatedEndingBalance)}) không khớp với số dư trên sao kê (${formatCurrency(extractedEndingBalance)}). Chênh lệch: ${formatCurrency(calculatedEndingBalance - extractedEndingBalance)}.`);
+                setBalanceMismatchWarning(`Số dư cuối kỳ tính toán (${formatCurrency(calculatedEndingBalance)}) không khớp với số dư trên sao kê (${formatCurrency(extractedEndingBalance)}).`);
             } else {
                 setBalanceMismatchWarning(null);
             }
@@ -314,10 +301,10 @@ export default function App() {
             <div className="max-w-7xl mx-auto">
                 <header className="text-center mb-8">
                     <h1 className="text-3xl sm:text-4xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-blue-500 to-teal-400">
-                        Chuyển Đổi Sổ Phụ Ngân Hàng Thành Sổ Kế Toán
+                        Chuyển Đổi Sổ Phụ Ngân Hàng (Powered by DeepSeek)
                     </h1>
                     <p className="mt-2 text-gray-600 dark:text-gray-400 flex items-center justify-center gap-2">
-                        <span>Upload sao kê (Excel, PDF, Ảnh), chia nhỏ xử lý thông minh & chính xác.</span>
+                        <span>Upload sao kê (Excel, PDF, Ảnh). Sử dụng DeepSeek Engine để phân tích dữ liệu.</span>
                         <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200 border border-purple-200 dark:border-purple-700">
                             Version {CURRENT_VERSION}
                         </span>
@@ -454,11 +441,11 @@ export default function App() {
                         {isLoading && loadingState === 'processing' && (
                             <div className="mt-4">
                                 <div className="flex justify-between text-xs text-gray-500 mb-1">
-                                    <span>Tiến trình xử lý</span>
+                                    <span>Tiến trình xử lý DeepSeek</span>
                                     <span>{Math.round(progress)}%</span>
                                 </div>
                                 <div className="w-full bg-gray-200 rounded-full h-3 dark:bg-gray-700 overflow-hidden">
-                                    <div className="bg-gradient-to-r from-blue-500 to-green-500 h-3 rounded-full transition-all duration-500 ease-out" style={{ width: `${progress}%` }}></div>
+                                    <div className="bg-gradient-to-r from-purple-500 to-indigo-500 h-3 rounded-full transition-all duration-500 ease-out" style={{ width: `${progress}%` }}></div>
                                 </div>
                                 <p className="text-center text-sm font-medium text-indigo-600 dark:text-indigo-400 mt-2 animate-pulse">{getLoadingMessage()}</p>
                             </div>
@@ -471,31 +458,31 @@ export default function App() {
                                  disabled={isLoading || processedChunks.length === 0}
                                  className="w-full flex items-center justify-center px-6 py-3 border border-transparent text-base font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:bg-green-400 disabled:cursor-not-allowed transition-colors"
                              >
-                                 {loadingState === 'processing' ? <><ProcessIcon /> Đang xử lý tuần tự...</> : '5. Bắt đầu Xử lý & Gộp dữ liệu'}
+                                 {loadingState === 'processing' ? <><ProcessIcon /> Đang xử lý tuần tự (DeepSeek)...</> : '5. Bắt đầu Xử lý (DeepSeek)'}
                              </button>
                          </div>
                     </div>
 
                     <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg">
                         <h2 className="text-2xl font-bold mb-4 flex items-baseline">
-                            Quy trình Batch Processing
+                            Quy trình Batch Processing (DeepSeek)
                         </h2>
                         <ul className="space-y-4 text-gray-600 dark:text-gray-400">
                             <li className="flex items-start">
                                 <span className="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-indigo-500 text-white font-bold text-sm mr-3">1</span>
-                                <span><b>Chia nhỏ (Chunking):</b> PDF được tách thành từng trang. Excel/Word được chia thành từng đoạn (20 dòng).</span>
+                                <span><b>Chia nhỏ & OCR:</b> Excel/Word được chia nhỏ. Ảnh/PDF được quét chữ (OCR).</span>
                             </li>
                             <li className="flex items-start">
-                                <span className="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-indigo-500 text-white font-bold text-sm mr-3">2</span>
-                                <span><b>Xử lý tuần tự:</b> AI xử lý từng phần nhỏ để đảm bảo độ chính xác tối đa và không bị lỗi Timeout.</span>
+                                <span className="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-purple-500 text-white font-bold text-sm mr-3">2</span>
+                                <span><b>DeepSeek Engine:</b> Dữ liệu được gửi tới DeepSeek V3 để phân tích và trích xuất JSON.</span>
                             </li>
                              <li className="flex items-start">
                                 <span className="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-indigo-500 text-white font-bold text-sm mr-3">3</span>
-                                <span><b>Gộp (Merging):</b> Kết quả từ các phần được tự động ghép lại thành một bảng thống nhất.</span>
+                                <span><b>Gộp (Merging):</b> Kết quả được ghép lại và kiểm tra cân đối.</span>
                             </li>
                             <li className="flex items-start">
                                 <span className="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-green-500 text-white font-bold text-sm mr-3">4</span>
-                                <span><b>Hoàn tất:</b> Bạn nhận được bảng kê chi tiết và chính xác.</span>
+                                <span><b>Hoàn tất:</b> Bảng kê chi tiết sẵn sàng tải về.</span>
                             </li>
                         </ul>
                     </div>
