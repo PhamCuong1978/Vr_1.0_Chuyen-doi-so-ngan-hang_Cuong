@@ -66,12 +66,12 @@ export const extractFromFile = async (file: File): Promise<{ text: string | null
                     
                     if (file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
                         // Word (.docx)
-                        if (typeof (window as any).mammoth === 'undefined') throw new Error("Thư viện Mammoth chưa tải.");
+                        if (typeof (window as any).mammoth === 'undefined') throw new Error("Thư viện Mammoth (đọc Word) chưa tải xong hoặc bị chặn.");
                         const result = await (window as any).mammoth.extractRawText({ arrayBuffer: content });
                         extractedText = result.value;
                     } else if (file.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' || file.name.endsWith('.xlsx') || file.name.endsWith('.xls')) {
                         // Excel (.xlsx, .xls)
-                        if (typeof (window as any).XLSX === 'undefined') throw new Error("Thư viện XLSX chưa tải.");
+                        if (typeof (window as any).XLSX === 'undefined') throw new Error("Thư viện XLSX (đọc Excel) chưa tải xong hoặc bị chặn. Vui lòng refresh trang.");
                         const workbook = (window as any).XLSX.read(content, { type: 'array' });
                         // Đọc tất cả các sheet
                         workbook.SheetNames.forEach((sheetName: string) => {

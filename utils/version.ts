@@ -1,6 +1,6 @@
 // Phiên bản hiện tại của ứng dụng
 // LƯU Ý: Trong môi trường dev/preview, cần cập nhật số này thủ công hoặc dùng script build CI/CD.
-export const CURRENT_VERSION = '1.2.1';
+export const CURRENT_VERSION = '1.2.2';
 
 /**
  * Công thức cập nhật phiên bản theo yêu cầu (Quy tắc Base 10):

@@ -39,11 +39,14 @@ export default function App() {
     const isLoading = loadingState !== 'idle';
     
     useEffect(() => {
-        localStorage.setItem('statementContent', statementContent);
+        // Chỉ lưu text ngắn vào localStorage để tránh lỗi Quota Exceeded
+        if (statementContent.length < 50000) {
+            localStorage.setItem('statementContent', statementContent);
+        }
     }, [statementContent]);
 
     useEffect(() => {
-        console.log(`App Version ${CURRENT_VERSION} Loaded - DeepSeek Edition`);
+        console.log(`App Version ${CURRENT_VERSION} Loaded - DeepSeek Edition (Hotfix)`);
         return () => {
             if (uploadInterval.current) clearInterval(uploadInterval.current);
         };
@@ -141,11 +144,13 @@ export default function App() {
                     const lines = res.text.split(/\r?\n/);
 
                     // --- LOGIC CHIA NHỎ MỚI (User Control) ---
-                    let chunkSize = 500; // Mặc định
+                    // FIX BUG: Đảm bảo chunkSize luôn >= 1 để tránh Infinite Loop
+                    let chunkSize = 500;
                     if (chunkStrategy === 'ALL') {
-                        chunkSize = lines.length; // Gửi toàn bộ
+                        chunkSize = Math.max(1, lines.length); // Nếu file rỗng thì min là 1
                     } else {
-                        chunkSize = parseInt(chunkStrategy);
+                        const parsed = parseInt(chunkStrategy);
+                        chunkSize = isNaN(parsed) || parsed <= 0 ? 500 : parsed;
                     }
 
                     const HEADER_ROWS = 5; // Giữ lại 5 dòng đầu làm header cho mỗi chunk
@@ -157,6 +162,7 @@ export default function App() {
                     } else {
                         // Chia nhỏ và dán header vào từng phần
                         const body = lines.slice(HEADER_ROWS);
+                        // FIX BUG: Vòng lặp an toàn
                         for (let i = 0; i < body.length; i += chunkSize) {
                             const chunkBody = body.slice(i, i + chunkSize).join('\n');
                             const chunkContent = `--- CONTEXT HEADER (DO NOT PROCESS, JUST REFERENCE) ---\n${header}\n\n--- DATA PART ${Math.floor(i/chunkSize) + 1} ---\n${chunkBody}`;
@@ -167,10 +173,19 @@ export default function App() {
             }
 
             setProcessedChunks(allChunks);
-            setStatementContent(fullPreviewText.trim());
+            
+            // FIX BUG: Giới hạn text hiển thị preview để tránh crash trình duyệt với file lớn
+            const PREVIEW_LIMIT = 50000;
+            if (fullPreviewText.length > PREVIEW_LIMIT) {
+                setStatementContent(fullPreviewText.substring(0, PREVIEW_LIMIT) + "\n\n... (Nội dung quá dài, đã ẩn bớt để tránh lag giao diện. Dữ liệu gốc vẫn được gửi đầy đủ cho AI) ...");
+            } else {
+                setStatementContent(fullPreviewText.trim());
+            }
+
             setProcessingStatus(`Đã sẵn sàng xử lý ${allChunks.length} phần dữ liệu.`);
 
         } catch (err) {
+            console.error(err);
             if (err instanceof Error) {
                 setError(`Lỗi trích xuất: ${err.message}`);
             } else {
