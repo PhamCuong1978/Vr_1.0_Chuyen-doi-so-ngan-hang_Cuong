@@ -82,8 +82,8 @@ const cleanAndParseJSON = <T>(text: string | undefined | null): T => {
         }
         return JSON.parse(cleaned) as T;
     } catch (e) {
-        console.error("JSON Parse Error:", text);
-        throw new Error(`Lỗi đọc dữ liệu từ DeepSeek: ${(e as Error).message}`);
+        console.error("JSON Parse Error. Raw Text:", text);
+        throw new Error(`Lỗi đọc dữ liệu từ DeepSeek (Parse Error). DeepSeek có thể đã trả về text thay vì JSON.`);
     }
 };
 
@@ -150,20 +150,24 @@ export const extractTextFromContent = async (content: { images: { mimeType: stri
  * Xử lý chính: Sử dụng 100% DeepSeek
  */
 export const processStatement = async (content: { text: string; }, isPartial: boolean = false): Promise<GeminiResponse> => {
-    const systemPrompt = `Bạn là Chuyên gia Kế toán (DeepSeek Engine). Nhiệm vụ: Chuyển đổi văn bản sao kê ngân hàng thành JSON chuẩn xác.
+    const systemPrompt = `Bạn là Chuyên gia Kế toán (DeepSeek Engine). 
+    Nhiệm vụ: Chuyển đổi văn bản sao kê ngân hàng thành JSON.
 
-    SCHEMA JSON BẮT BUỘC:
+    NẾU KHÔNG CÓ DỮ LIỆU GIAO DỊCH (Vd: chỉ có header/footer/chữ ký):
+    Hãy trả về JSON rỗng hợp lệ: { "accountInfo": {}, "transactions": [], "openingBalance": 0, "endingBalance": 0 }
+    
+    SCHEMA JSON BẮT BUỘC (Khi có dữ liệu):
     {
-        "openingBalance": number, // Mặc định 0 nếu không thấy.
-        "endingBalance": number, // Mặc định 0 nếu không thấy.
+        "openingBalance": number, // Mặc định 0
+        "endingBalance": number, // Mặc định 0
         "accountInfo": { "accountName": "...", "accountNumber": "...", "bankName": "...", "branch": "..." },
         "transactions": [
             { 
                 "transactionCode": "string", 
                 "date": "DD/MM/YYYY", 
                 "description": "string", 
-                "debit": number, // Số tiền ghi nợ (Tiền ra)
-                "credit": number, // Số tiền ghi có (Tiền vào)
+                "debit": number, 
+                "credit": number, 
                 "fee": number, 
                 "vat": number 
             }
@@ -171,16 +175,13 @@ export const processStatement = async (content: { text: string; }, isPartial: bo
     }
 
     QUY TẮC NGHIỆP VỤ:
-    1. Số tiền: Loại bỏ dấu phân cách (1.000.000 -> 1000000). Không được nhầm lẫn giữa Debit và Credit.
-       - Ngân hàng ghi "Nợ" (Debit) -> Tiền đi (Sổ cái bên Có).
-       - Ngân hàng ghi "Có" (Credit) -> Tiền đến (Sổ cái bên Nợ).
-       - TUY NHIÊN: Trong JSON output, hãy giữ đúng ngữ nghĩa: "debit" là Tiền Nợ (Rút/Chuyển đi), "credit" là Tiền Có (Nhận được).
+    1. Số tiền: Loại bỏ dấu phân cách. Ngân hàng ghi "Nợ" -> Tiền ra (debit). Ngân hàng ghi "Có" -> Tiền vào (credit).
     2. Ngày tháng: Định dạng DD/MM/YYYY.
-    3. Nếu là dữ liệu cắt nhỏ (Partial): Hãy cố gắng trích xuất giao dịch tối đa, bỏ qua header/footer nếu không rõ ràng.`;
+    3. HEADER REFERENCE: Trong input có thể có phần header dùng để tham chiếu (đánh dấu bằng '--- CONTEXT HEADER'). Hãy dùng nó để hiểu các cột, NHƯNG KHÔNG trích xuất lại dữ liệu trong header đó nếu nó không nằm trong phần DATA PART.`;
 
-    const userPrompt = `Dữ liệu sao kê thô:\n\n${content.text}`;
+    const userPrompt = `Dữ liệu sao kê:\n\n${content.text}`;
 
-    // Gọi trực tiếp DeepSeek, không Fallback
+    // Gọi trực tiếp DeepSeek
     const jsonString = await callDeepSeek([
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt }
@@ -203,8 +204,8 @@ export const processBatchData = async (
     let foundAccountInfo = false;
     let foundOpening = false;
 
-    // DeepSeek API khá nhanh, nhưng vẫn nên delay nhẹ để tránh Rate Limit (nếu dùng free tier)
-    const BASE_DELAY = 1000; 
+    // DeepSeek API khá nhanh
+    const BASE_DELAY = 500; 
 
     for (let i = 0; i < chunks.length; i++) {
         onProgress(i + 1, chunks.length);
@@ -224,7 +225,6 @@ export const processBatchData = async (
             }
         } catch (err: any) {
             console.error(`Lỗi xử lý phần ${i + 1}:`, err);
-            // Nếu lỗi DeepSeek, thử chờ và tiếp tục
             if (String(err).includes('429')) await delay(5000);
         }
 
@@ -267,13 +267,11 @@ export const processBatchData = async (
 // --- CHAT WITH DEEPSEEK ---
 const chatResponseSchema = {
     type: "json_object",
-    // DeepSeek ko cần định nghĩa schema chi tiết trong API call như Gemini, chỉ cần System Prompt tốt.
 };
 
 export const chatWithAI = async (message: string, currentReport: GeminiResponse, chatHistory: ChatMessage[], rawStatementContent: string, image: { mimeType: string; data: string } | null): Promise<AIChatResponse> => {
     
     if (image) {
-        // DeepSeek V3 chưa hỗ trợ ảnh
         return {
             responseText: "Xin lỗi anh, hiện tại DeepSeek Engine chưa hỗ trợ xem hình ảnh trực tiếp trong khung chat. Anh vui lòng nhập văn bản hoặc trích xuất lại file nhé.",
             action: undefined
@@ -298,7 +296,6 @@ export const chatWithAI = async (message: string, currentReport: GeminiResponse,
 
     const formattedHistory = chatHistory.map(msg => ({ role: msg.role === 'model' ? 'assistant' : 'user', content: msg.content }));
     
-    // Gọi DeepSeek
     const jsonString = await callDeepSeek([
         { role: "system", content: systemPrompt },
         { role: "user", content: `Context (Raw Text Partial): ${rawStatementContent.substring(0, 2000)}...` },

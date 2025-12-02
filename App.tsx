@@ -10,12 +10,16 @@ import { CURRENT_VERSION } from './utils/version';
 
 type LoadingState = 'idle' | 'extracting' | 'processing';
 type UploadState = 'idle' | 'uploading' | 'completed';
+type ChunkStrategy = 'ALL' | '500' | '200' | '100' | '50';
 
 export default function App() {
     const [openingBalance, setOpeningBalance] = useState('');
     const [statementContent, setStatementContent] = useState<string>(() => localStorage.getItem('statementContent') || '');
     const [processedChunks, setProcessedChunks] = useState<{ type: 'text' | 'image', data: string }[]>([]);
     
+    // Config chia nhỏ
+    const [chunkStrategy, setChunkStrategy] = useState<ChunkStrategy>('500'); // Mặc định 500 dòng để tối ưu DeepSeek
+
     const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
     
     const [uploadState, setUploadState] = useState<UploadState>('idle');
@@ -132,20 +136,30 @@ export default function App() {
                     });
                     fullPreviewText += `[Đã tải ${res.images.length} trang hình ảnh/PDF - Sẽ dùng OCR]\n`;
                 } else if (res.text) {
-                    // Text/Excel -> Chunks
+                    // Text/Excel -> Chunks logic
                     fullPreviewText += res.text + '\n\n';
                     const lines = res.text.split(/\r?\n/);
-                    const CHUNK_SIZE = 20; 
-                    const HEADER_ROWS = 5; 
-                    const header = lines.slice(0, HEADER_ROWS).join('\n');
-                    const body = lines.slice(HEADER_ROWS); 
 
-                    if (body.length === 0) {
-                         allChunks.push({ type: 'text', data: res.text });
+                    // --- LOGIC CHIA NHỎ MỚI (User Control) ---
+                    let chunkSize = 500; // Mặc định
+                    if (chunkStrategy === 'ALL') {
+                        chunkSize = lines.length; // Gửi toàn bộ
                     } else {
-                        for (let i = 0; i < body.length; i += CHUNK_SIZE) {
-                            const chunkBody = body.slice(i, i + CHUNK_SIZE).join('\n');
-                            const chunkContent = `--- CONTEXT HEADER ---\n${header}\n--- DATA PART ${Math.floor(i/CHUNK_SIZE) + 1} ---\n${chunkBody}`;
+                        chunkSize = parseInt(chunkStrategy);
+                    }
+
+                    const HEADER_ROWS = 5; // Giữ lại 5 dòng đầu làm header cho mỗi chunk
+                    const header = lines.slice(0, HEADER_ROWS).join('\n');
+                    
+                    // Nếu gửi toàn bộ hoặc file quá ngắn
+                    if (lines.length <= chunkSize) {
+                        allChunks.push({ type: 'text', data: res.text });
+                    } else {
+                        // Chia nhỏ và dán header vào từng phần
+                        const body = lines.slice(HEADER_ROWS);
+                        for (let i = 0; i < body.length; i += chunkSize) {
+                            const chunkBody = body.slice(i, i + chunkSize).join('\n');
+                            const chunkContent = `--- CONTEXT HEADER (DO NOT PROCESS, JUST REFERENCE) ---\n${header}\n\n--- DATA PART ${Math.floor(i/chunkSize) + 1} ---\n${chunkBody}`;
                             allChunks.push({ type: 'text', data: chunkContent });
                         }
                     }
@@ -301,10 +315,10 @@ export default function App() {
             <div className="max-w-7xl mx-auto">
                 <header className="text-center mb-8">
                     <h1 className="text-3xl sm:text-4xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-blue-500 to-teal-400">
-                        Chuyển Đổi Sổ Phụ Ngân Hàng (Powered by DeepSeek)
+                        Chuyển Đổi Sổ Phụ Ngân Hàng (DeepSeek)
                     </h1>
                     <p className="mt-2 text-gray-600 dark:text-gray-400 flex items-center justify-center gap-2">
-                        <span>Upload sao kê (Excel, PDF, Ảnh). Sử dụng DeepSeek Engine để phân tích dữ liệu.</span>
+                        <span>Upload sao kê (Excel, PDF, Ảnh). DeepSeek Engine V3.</span>
                         <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200 border border-purple-200 dark:border-purple-700">
                             Version {CURRENT_VERSION}
                         </span>
@@ -373,11 +387,27 @@ export default function App() {
                                 </div>
                             </div>
 
-                            {/* BƯỚC 2: TRÍCH XUẤT */}
+                            {/* BƯỚC 2: CẤU HÌNH & TRÍCH XUẤT */}
                             <div className="mb-6">
                                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                                    2. Chuẩn bị dữ liệu (Tách trang / Chia dòng)
+                                    2. Cấu hình & Trích xuất
                                 </label>
+                                
+                                <div className="flex gap-2 mb-3">
+                                    <select 
+                                        value={chunkStrategy}
+                                        onChange={(e) => setChunkStrategy(e.target.value as ChunkStrategy)}
+                                        className="block w-full px-3 py-2 text-sm bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                                        disabled={loadingState === 'extracting'}
+                                    >
+                                        <option value="500">Tự động: 500 dòng/phần (Khuyên dùng)</option>
+                                        <option value="ALL">Gửi toàn bộ (1 phần duy nhất)</option>
+                                        <option value="200">Chia nhỏ: 200 dòng/phần</option>
+                                        <option value="100">Chia nhỏ: 100 dòng/phần</option>
+                                        <option value="50">Chia nhỏ: 50 dòng/phần (Debug)</option>
+                                    </select>
+                                </div>
+
                                 <button
                                     onClick={handleExtractText}
                                     disabled={selectedFiles.length === 0 || loadingState === 'extracting'}
@@ -390,12 +420,12 @@ export default function App() {
                                     {loadingState === 'extracting' ? <ProcessIcon /> : null}
                                     {loadingState === 'extracting' 
                                         ? 'Đang chuẩn bị...' 
-                                        : `Trích xuất & Chia nhỏ (${selectedFiles.length} file)`
+                                        : `Trích xuất & Chia nhỏ`
                                     }
                                 </button>
                                 {processedChunks.length > 0 && (
                                     <div className="mt-2 p-2 bg-indigo-50 text-indigo-700 rounded text-xs text-center border border-indigo-200">
-                                        Đã chia thành <b>{processedChunks.length}</b> phần nhỏ để xử lý chính xác.
+                                        Đã chia thành <b>{processedChunks.length}</b> phần theo cấu hình bạn chọn.
                                     </div>
                                 )}
                             </div>
@@ -403,7 +433,7 @@ export default function App() {
                             {/* BƯỚC 3: NỘI DUNG */}
                             <div className="mb-4">
                                 <label htmlFor="statementContent" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                                    3. Xem trước (Preview gộp)
+                                    3. Xem trước (Preview)
                                 </label>
                                 <textarea
                                     id="statementContent"
@@ -470,7 +500,7 @@ export default function App() {
                         <ul className="space-y-4 text-gray-600 dark:text-gray-400">
                             <li className="flex items-start">
                                 <span className="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-indigo-500 text-white font-bold text-sm mr-3">1</span>
-                                <span><b>Chia nhỏ & OCR:</b> Excel/Word được chia nhỏ. Ảnh/PDF được quét chữ (OCR).</span>
+                                <span><b>Chia nhỏ & OCR:</b> Dữ liệu Excel/CSV được chia theo cấu hình bạn chọn (Mặc định 500 dòng). Header luôn được giữ.</span>
                             </li>
                             <li className="flex items-start">
                                 <span className="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-purple-500 text-white font-bold text-sm mr-3">2</span>
