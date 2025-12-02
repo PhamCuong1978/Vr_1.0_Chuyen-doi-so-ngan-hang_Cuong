@@ -129,30 +129,33 @@ export default function App() {
 
             for (const res of results) {
                 if (res.images.length > 0) {
-                    // TRƯỜNG HỢP 1: PDF hoặc Ảnh -> Chia theo trang/ảnh
+                    // TRƯỜNG HỢP 1: PDF hoặc Ảnh -> Chia theo trang/ảnh (Đã xử lý không giới hạn ở fileHelper)
                     res.images.forEach(img => {
                         allChunks.push({ type: 'image', data: img.data });
                     });
                     fullPreviewText += `[Đã tải ${res.images.length} trang hình ảnh/PDF]\n`;
                 } else if (res.text) {
-                    // TRƯỜNG HỢP 2: Text/Excel -> Chia nhỏ theo 20 dòng
+                    // TRƯỜNG HỢP 2: Text/Excel -> Chia nhỏ theo 20 dòng, không giới hạn số lượng
                     fullPreviewText += res.text + '\n\n';
                     
-                    const lines = res.text.split('\n');
+                    // Split theo dòng (Hỗ trợ cả \n và \r\n)
+                    const lines = res.text.split(/\r?\n/);
+                    
                     const CHUNK_SIZE = 20; 
-                    // Giữ lại Header (khoảng 5-10 dòng đầu) để AI hiểu ngữ cảnh cho các chunk sau
-                    // Giả sử 10 dòng đầu là header
-                    const header = lines.slice(0, 10).join('\n');
-                    const body = lines.slice(10); // Phần còn lại là giao dịch
+                    const HEADER_ROWS = 5; // Giữ 5 dòng đầu làm Header ngữ cảnh (Tên TK, Số TK thường nằm ở đây)
+
+                    const header = lines.slice(0, HEADER_ROWS).join('\n');
+                    const body = lines.slice(HEADER_ROWS); // Toàn bộ phần còn lại là dữ liệu cần xử lý
 
                     if (body.length === 0) {
                          // File quá ngắn, gửi cả cục
                          allChunks.push({ type: 'text', data: res.text });
                     } else {
+                        // Vòng lặp chia nhỏ toàn bộ Body thành các phần 20 dòng
                         for (let i = 0; i < body.length; i += CHUNK_SIZE) {
                             const chunkBody = body.slice(i, i + CHUNK_SIZE).join('\n');
-                            // Ghép Header + Chunk Body để AI không bị mất ngữ cảnh
-                            const chunkContent = `--- HEADER INFO ---\n${header}\n--- TRANSACTIONS PART ${Math.floor(i/CHUNK_SIZE) + 1} ---\n${chunkBody}`;
+                            // Ghép Header + Chunk Body để AI không bị mất ngữ cảnh tài khoản
+                            const chunkContent = `--- CONTEXT HEADER (NOT TRANSACTION) ---\n${header}\n--- DATA PART ${Math.floor(i/CHUNK_SIZE) + 1} ---\n${chunkBody}`;
                             allChunks.push({ type: 'text', data: chunkContent });
                         }
                     }

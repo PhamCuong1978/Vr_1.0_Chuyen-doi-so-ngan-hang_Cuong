@@ -37,6 +37,35 @@ const getDeepSeekKey = () => {
     return key;
 };
 
+// --- HELPER: UTIL FUNCTIONS ---
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Hàm bọc Retry: Tự động thử lại nếu API báo bận (429) hoặc lỗi mạng
+const callWithRetry = async <T>(fn: () => Promise<T>, retries = 3, delayMs = 4000): Promise<T> => {
+    try {
+        return await fn();
+    } catch (error: any) {
+        // Kiểm tra kỹ các dạng lỗi Rate Limit của Google
+        const errorMessage = typeof error === 'object' ? JSON.stringify(error) : String(error);
+        const isRateLimit = errorMessage.includes('429') || 
+                            errorMessage.includes('RESOURCE_EXHAUSTED') || 
+                            errorMessage.includes('quota') ||
+                            (error.status === 429);
+        
+        const isOverloaded = errorMessage.includes('503') || 
+                             errorMessage.includes('Overloaded') ||
+                             (error.status === 503);
+        
+        if (retries > 0 && (isRateLimit || isOverloaded)) {
+            console.warn(`⚠️ API Busy/Limit (429/503). Retrying in ${delayMs/1000}s... (${retries} left)`);
+            await delay(delayMs);
+            // Tăng thời gian chờ theo cấp số nhân (Exponential Backoff) để tránh spam
+            return callWithRetry(fn, retries - 1, delayMs * 2); 
+        }
+        throw error;
+    }
+};
+
 // --- HELPER: JSON CLEANER & PARSER (ROBUST v2) ---
 const cleanAndParseJSON = <T>(text: string | undefined | null): T => {
     if (!text || typeof text !== 'string' || text.trim() === '') {
@@ -117,7 +146,7 @@ const callDeepSeek = async (messages: any[], jsonMode: boolean = true) => {
     const apiKey = getDeepSeekKey();
     if (!apiKey) throw new Error("NO_DEEPSEEK_KEY");
 
-    try {
+    return callWithRetry(async () => {
         const response = await fetch("https://api.deepseek.com/chat/completions", {
             method: "POST",
             headers: {
@@ -136,33 +165,33 @@ const callDeepSeek = async (messages: any[], jsonMode: boolean = true) => {
 
         if (!response.ok) {
             const errData = await response.json().catch(() => ({}));
+            // Nếu 429 hoặc 5xx, ném lỗi để hàm retry bắt được
+            if (response.status === 429 || response.status >= 500) {
+                 throw new Error(`DeepSeek Server Error: ${response.status}`);
+            }
             throw new Error(`DeepSeek API Error: ${errData.error?.message || response.statusText}`);
         }
 
         const data = await response.json();
         return data.choices[0].message.content;
-    } catch (error) {
-        console.warn("DeepSeek Call Failed, switching to Fallback...", error);
-        throw error;
-    }
+    });
 };
 
 export const extractTextFromContent = async (content: { images: { mimeType: string; data: string }[] }): Promise<string> => {
     if (content.images.length === 0) return '';
     const prompt = `Bạn là công cụ OCR. Đọc toàn bộ văn bản trong ảnh. Giữ nguyên số liệu.`;
-    try {
+    
+    return callWithRetry(async () => {
         const ai = getGeminiAI();
         const imageParts = content.images.map(img => ({ inlineData: { mimeType: img.mimeType, data: img.data } }));
         const modelRequest = {
-            model: "gemini-2.5-flash", 
+            model: "gemini-2.5-flash", // Flash xử lý ảnh tốt và nhanh
             contents: { parts: [{ text: prompt }, ...imageParts] },
             config: { temperature: 0 }
         };
         const response = await ai.models.generateContent(modelRequest);
         return (response.text || '').trim();
-    } catch (error) {
-        throw error;
-    }
+    }, 3, 5000); // OCR tốn tài nguyên, retry chậm hơn
 }
 
 // --- CORE: GEMINI FALLBACK LOGIC ---
@@ -201,20 +230,28 @@ const processStatementWithGemini = async (text: string, isPartial: boolean = fal
     
     Nội dung: ${text}`;
 
+    // CHIẾN LƯỢC MỚI: Ưu tiên Gemini Flash trước (Nhanh, Limit cao hơn).
+    // Chỉ fallback sang Pro nếu cần thiết.
     try {
-        const response = await ai.models.generateContent({
-            model: "gemini-3-pro-preview", 
-            contents: prompt,
-            config: { responseMimeType: "application/json", responseSchema: responseSchema, temperature: 0 },
-        });
-        return cleanAndParseJSON<GeminiResponse>(response.text);
+        return await callWithRetry(async () => {
+            const response = await ai.models.generateContent({
+                model: "gemini-2.5-flash", 
+                contents: prompt,
+                config: { responseMimeType: "application/json", responseSchema: responseSchema, temperature: 0 },
+            });
+            return cleanAndParseJSON<GeminiResponse>(response.text);
+        }, 3, 4000); // Retry 3 lần, bắt đầu delay 4s
     } catch (error) {
-        const responseFallback = await ai.models.generateContent({
-            model: "gemini-2.5-flash", 
-            contents: prompt,
-            config: { responseMimeType: "application/json", responseSchema: responseSchema, temperature: 0 },
-        });
-        return cleanAndParseJSON<GeminiResponse>(responseFallback.text);
+        console.warn("Gemini Flash Failed/Limited, switching to Pro...", error);
+        // Fallback sang Gemini Pro (Thông minh hơn nhưng chậm/đắt hơn)
+        return await callWithRetry(async () => {
+            const responseFallback = await ai.models.generateContent({
+                model: "gemini-3-pro-preview", 
+                contents: prompt,
+                config: { responseMimeType: "application/json", responseSchema: responseSchema, temperature: 0 },
+            });
+            return cleanAndParseJSON<GeminiResponse>(responseFallback.text);
+        }, 2, 6000); // Delay lâu hơn cho Pro
     }
 };
 
@@ -269,52 +306,63 @@ export const processBatchData = async (
     let foundAccountInfo = false;
     let foundOpening = false;
 
+    // Rate Limit Config
+    // Tăng thời gian chờ mặc định lên 4000ms (4 giây) để đảm bảo an toàn cho quota RPM (15 RPM).
+    const BASE_DELAY = 4000; 
+
     for (let i = 0; i < chunks.length; i++) {
         onProgress(i + 1, chunks.length); // Cập nhật tiến trình
+        
+        // --- RATE LIMIT PROTECTION ---
+        if (i > 0) {
+            await delay(BASE_DELAY);
+        }
+
         const chunk = chunks[i];
-        let result: GeminiResponse;
+        let result: GeminiResponse | null = null;
 
         try {
             if (chunk.type === 'text') {
                 result = await processStatement({ text: chunk.data }, true);
             } else {
-                // Nếu là ảnh, OCR trước rồi mới process, hoặc gửi ảnh trực tiếp cho Gemini Vision (tối ưu hơn)
-                // Ở đây ta dùng cách an toàn: OCR text -> Process Text để thống nhất logic
+                // Nếu là ảnh, OCR trước rồi mới process
                 const text = await extractTextFromContent({ images: [{ mimeType: 'image/jpeg', data: chunk.data }] });
                 result = await processStatement({ text: text }, true);
             }
-
-            // --- MERGING LOGIC (GỘP DỮ LIỆU) ---
+        } catch (err: any) {
+            console.error(`Lỗi xử lý phần ${i + 1}:`, err);
             
-            // 1. Gộp giao dịch
+            // Nếu lỗi là 429 (Too Many Requests), hãy nghỉ ngơi lâu hơn trước khi tiếp tục các phần sau (nếu có)
+            const errorMessage = JSON.stringify(err);
+            if (errorMessage.includes('429') || errorMessage.includes('RESOURCE_EXHAUSTED')) {
+                console.warn("Phát hiện Rate Limit, tạm dừng 10s để hồi phục...");
+                await delay(10000); 
+            }
+            // Không throw lỗi chết chương trình, tiếp tục vòng lặp để cứu dữ liệu các phần khác
+        }
+
+        if (result) {
+            // --- MERGING LOGIC (GỘP DỮ LIỆU) ---
             if (result.transactions && Array.isArray(result.transactions)) {
                 combinedTransactions = [...combinedTransactions, ...result.transactions];
             }
 
-            // 2. Lấy thông tin tài khoản (Ưu tiên chunk đầu tiên hoặc chunk nào có dữ liệu đầy đủ)
             if (!foundAccountInfo && result.accountInfo && result.accountInfo.accountNumber) {
                 finalAccountInfo = result.accountInfo;
                 foundAccountInfo = true;
             }
 
-            // 3. Lấy số dư đầu kỳ (Thường ở chunk đầu)
             if (!foundOpening && result.openingBalance !== undefined && result.openingBalance !== 0) {
                 finalOpeningBalance = result.openingBalance;
                 foundOpening = true;
             }
 
-            // 4. Lấy số dư cuối kỳ (Cập nhật liên tục, lấy giá trị của chunk cuối cùng tìm thấy)
             if (result.endingBalance !== undefined && result.endingBalance !== 0) {
                 finalEndingBalance = result.endingBalance;
             }
-
-        } catch (err) {
-            console.error(`Lỗi xử lý phần ${i + 1}:`, err);
-            // Không throw lỗi chết chương trình, chỉ log và tiếp tục các phần khác
         }
     }
 
-    // Sort lại toàn bộ giao dịch sau khi gộp
     combinedTransactions.sort((a, b) => {
         const parseDate = (dateStr: string) => {
             if (!dateStr) return 0;
@@ -332,7 +380,7 @@ export const processBatchData = async (
     };
 };
 
-// --- CHAT (Giữ nguyên) ---
+// --- CHAT ---
 const chatResponseSchema = {
     type: Type.OBJECT,
     properties: {
@@ -347,19 +395,21 @@ const chatResponseSchema = {
 
 const chatWithGemini = async (promptParts: any[]): Promise<AIChatResponse> => {
     const ai = getGeminiAI();
-    try {
-        const response = await ai.models.generateContent({
-            model: "gemini-3-pro-preview", contents: { parts: promptParts },
-            config: { responseMimeType: "application/json", responseSchema: chatResponseSchema, temperature: 0.1 },
-        });
-        return cleanAndParseJSON<AIChatResponse>(response.text);
-    } catch (error) {
-        const response = await ai.models.generateContent({
-            model: "gemini-2.5-flash", contents: { parts: promptParts },
-            config: { responseMimeType: "application/json", responseSchema: chatResponseSchema, temperature: 0.1 },
-        });
-        return cleanAndParseJSON<AIChatResponse>(response.text);
-    }
+    return callWithRetry(async () => {
+        try {
+            const response = await ai.models.generateContent({
+                model: "gemini-3-pro-preview", contents: { parts: promptParts },
+                config: { responseMimeType: "application/json", responseSchema: chatResponseSchema, temperature: 0.1 },
+            });
+            return cleanAndParseJSON<AIChatResponse>(response.text);
+        } catch (error) {
+            const response = await ai.models.generateContent({
+                model: "gemini-2.5-flash", contents: { parts: promptParts },
+                config: { responseMimeType: "application/json", responseSchema: chatResponseSchema, temperature: 0.1 },
+            });
+            return cleanAndParseJSON<AIChatResponse>(response.text);
+        }
+    });
 }
 
 export const chatWithAI = async (message: string, currentReport: GeminiResponse, chatHistory: ChatMessage[], rawStatementContent: string, image: { mimeType: string; data: string } | null): Promise<AIChatResponse> => {
