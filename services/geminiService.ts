@@ -267,16 +267,19 @@ export const processStatement = async (content: { text: string; }, isPartial: bo
     const systemPrompt = `Bạn là Chuyên gia Xử lý Dữ liệu Kế toán (AI Engine).
     Nhiệm vụ: Chuyển đổi văn bản sao kê ngân hàng thành JSON chuẩn.
 
-    HƯỚNG DẪN XỬ LÝ QUAN TRỌNG:
-    1.  **Input Format:** Đầu vào có thể là văn bản thô HOẶC một cấu trúc JSON có sẵn (ví dụ: snake_case như 'debit_amount', 'credit_amount').
-        - Nếu đầu vào đã là JSON: Hãy MAP (ánh xạ) các trường đó sang SCHEMA CHUẨN của tôi (camelCase).
-        - Ví dụ: 'debit_amount' -> 'debit', 'credit_amount' -> 'credit', 'transaction_date' -> 'date'.
+    HƯỚNG DẪN XỬ LÝ QUAN TRỌNG (ACCOUNTING MAPPING):
+    1.  **Nguyên tắc Bất Di Bất Dịch:** Sổ phụ Ngân hàng luôn NGƯỢC với Sổ Kế toán Doanh nghiệp (TK 112).
+    
+    2.  **Mapping Nợ/Có (CỰC KỲ QUAN TRỌNG):**
+        -   Nếu Sao kê ghi: "Ghi Có", "Credit", "Tiền vào", "CR", "Số tiền nhận" -> Đây là tiền VÀO doanh nghiệp -> Gán vào field **'debit'** (Sổ cái ghi Nợ 112).
+        -   Nếu Sao kê ghi: "Ghi Nợ", "Debit", "Tiền ra", "DR", "Số tiền chi" -> Đây là tiền RA khỏi doanh nghiệp -> Gán vào field **'credit'** (Sổ cái ghi Có 112).
+    
+    3.  **Xử lý cột số tiền:**
+        -   Nếu chỉ có 1 cột số tiền: Dựa vào dấu (+) hoặc loại GD "Nhận/Nộp" -> Gán 'debit'. Dựa vào dấu (-) hoặc loại GD "Chi/Rút/Phí" -> Gán 'credit'.
+        -   Tuyệt đối không nhầm lẫn. 'debit' trong JSON output nghĩa là 'Accounting Debit' (Tiền tăng).
 
-    2.  **Nhận diện bảng (Anchor Detection):**
+    4.  **Nhận diện bảng & Gộp dòng:**
         -   Quét từ trên xuống. Bắt đầu lấy dữ liệu khi thấy dòng có Ngày tháng hoặc Số tiền.
-        -   Bỏ qua header rác.
-
-    3.  **Logic Gộp dòng (Multiline Merge):**
         -   Gộp các dòng mô tả không có ngày tháng vào giao dịch trước đó.
 
     SCHEMA JSON OUTPUT (BẮT BUỘC):
@@ -289,15 +292,15 @@ export const processStatement = async (content: { text: string; }, isPartial: bo
                 "transactionCode": "string", 
                 "date": "DD/MM/YYYY", 
                 "description": "string", 
-                "debit": number (Luôn dương), 
-                "credit": number (Luôn dương), 
+                "debit": number (Tiền vào/Kế toán ghi Nợ - luôn dương), 
+                "credit": number (Tiền ra/Kế toán ghi Có - luôn dương), 
                 "fee": number, 
                 "vat": number 
             }
         ]
     }
     
-    LƯU Ý CUỐI: Trả về JSON Minified (không xuống dòng thừa) để tiết kiệm token.`;
+    LƯU Ý CUỐI: Trả về JSON Minified.`;
 
     const userPrompt = `Dữ liệu sao kê cần xử lý:\n\n${content.text}`;
 
