@@ -13,26 +13,15 @@ try {
     win.process.env = win.process.env || {};
 
     // 2. Lấy giá trị trực tiếp từ import.meta.env
-    // QUAN TRỌNG: Phải gọi tường minh (explicit) để bundler của Vercel nhận diện và replace string
-    // Không dùng loop hoặc dynamic access ở đây.
-    
-    // API KEY Google Gemini
     const viteApiKey = import.meta.env.VITE_API_KEY || import.meta.env.API_KEY;
     
-    // API KEY DeepSeek
-    const viteDeepSeekKey = import.meta.env.VITE_DEEPSEEK_API_KEY || import.meta.env.DEEPSEEK_API_KEY;
-
-    // 3. Gán vào process.env để các logic cũ hoạt động
+    // 3. Gán vào process.env
     if (viteApiKey) {
         win.process.env.API_KEY = viteApiKey;
-    }
-    if (viteDeepSeekKey) {
-        win.process.env.DEEPSEEK_API_KEY = viteDeepSeekKey;
     }
 
     console.log("Environment Config Loaded:", {
       gemini: !!win.process.env.API_KEY,
-      deepseek: !!win.process.env.DEEPSEEK_API_KEY
     });
   }
 } catch (e) {

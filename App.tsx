@@ -17,8 +17,8 @@ export default function App() {
     const [statementContent, setStatementContent] = useState<string>(() => localStorage.getItem('statementContent') || '');
     const [processedChunks, setProcessedChunks] = useState<{ type: 'text' | 'image', data: string }[]>([]);
     
-    // Config chia nhỏ
-    const [chunkStrategy, setChunkStrategy] = useState<ChunkStrategy>('500'); // Mặc định 500 dòng để tối ưu DeepSeek
+    // Config chia nhỏ - Gemini có context window lớn, 500 là an toàn
+    const [chunkStrategy, setChunkStrategy] = useState<ChunkStrategy>('500');
 
     const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
     
@@ -39,14 +39,13 @@ export default function App() {
     const isLoading = loadingState !== 'idle';
     
     useEffect(() => {
-        // Chỉ lưu text ngắn vào localStorage để tránh lỗi Quota Exceeded
         if (statementContent.length < 50000) {
             localStorage.setItem('statementContent', statementContent);
         }
     }, [statementContent]);
 
     useEffect(() => {
-        console.log(`App Version ${CURRENT_VERSION} Loaded - DeepSeek Edition (Hotfix)`);
+        console.log(`App Version ${CURRENT_VERSION} Loaded - Gemini Pro Edition`);
         return () => {
             if (uploadInterval.current) clearInterval(uploadInterval.current);
         };
@@ -133,42 +132,30 @@ export default function App() {
 
             for (const res of results) {
                 if (res.images.length > 0) {
-                    // PDF/Image -> Chunks (DeepSeek ko đọc dc ảnh -> phải qua OCR trước)
                     res.images.forEach(img => {
                         allChunks.push({ type: 'image', data: img.data });
                     });
-                    fullPreviewText += `[Đã tải ${res.images.length} trang hình ảnh/PDF - Sẽ dùng OCR]\n`;
+                    fullPreviewText += `[Đã tải ${res.images.length} trang hình ảnh/PDF - Sẽ dùng Gemini OCR]\n`;
                 } else if (res.text) {
-                    // Text/Excel -> Chunks logic
                     fullPreviewText += res.text + '\n\n';
                     const lines = res.text.split(/\r?\n/);
-
-                    // --- LOGIC CHIA NHỎ MỚI (User Control) ---
-                    // FIX BUG: Đảm bảo chunkSize luôn >= 1 để tránh Infinite Loop
                     let chunkSize = 500;
                     if (chunkStrategy === 'ALL') {
-                        chunkSize = Math.max(1, lines.length); // Nếu file rỗng thì min là 1
+                        chunkSize = Math.max(1, lines.length);
                     } else {
                         const parsed = parseInt(chunkStrategy);
                         chunkSize = isNaN(parsed) || parsed <= 0 ? 500 : parsed;
                     }
 
-                    // --- CẬP NHẬT v1.2.5: Tăng Header Context ---
-                    // Nhiều file Excel có header nằm ở dòng 10-15. 5 dòng là không đủ.
-                    // Tăng lên 20 dòng để đảm bảo các chunk sau luôn có tiêu đề cột tham chiếu.
                     const HEADER_ROWS = 20; 
                     const header = lines.slice(0, HEADER_ROWS).join('\n');
                     
-                    // Nếu gửi toàn bộ hoặc file quá ngắn
                     if (lines.length <= chunkSize) {
                         allChunks.push({ type: 'text', data: res.text });
                     } else {
-                        // Chia nhỏ và dán header vào từng phần
                         const body = lines.slice(HEADER_ROWS);
-                        // FIX BUG: Vòng lặp an toàn
                         for (let i = 0; i < body.length; i += chunkSize) {
                             const chunkBody = body.slice(i, i + chunkSize).join('\n');
-                            // FORMAT RÕ RÀNG HƠN CHO AI
                             const chunkContent = `--- CONTEXT HEADER (REFERENCE ONLY - DO NOT EXTRACT) ---\n${header}\n--------------------------------------------------------\n\n--- DATA PART ${Math.floor(i/chunkSize) + 1} (EXTRACT THIS) ---\n${chunkBody}`;
                             allChunks.push({ type: 'text', data: chunkContent });
                         }
@@ -178,7 +165,6 @@ export default function App() {
 
             setProcessedChunks(allChunks);
             
-            // FIX BUG: Giới hạn text hiển thị preview để tránh crash trình duyệt với file lớn
             const PREVIEW_LIMIT = 50000;
             if (fullPreviewText.length > PREVIEW_LIMIT) {
                 setStatementContent(fullPreviewText.substring(0, PREVIEW_LIMIT) + "\n\n... (Nội dung quá dài, đã ẩn bớt để tránh lag giao diện. Dữ liệu gốc vẫn được gửi đầy đủ cho AI) ...");
@@ -213,13 +199,13 @@ export default function App() {
         setHistory([]); 
         
         setProgress(0);
-        setProcessingStatus(`Chuẩn bị gửi dữ liệu tới DeepSeek...`);
+        setProcessingStatus(`Chuẩn bị gửi dữ liệu tới Gemini Pro...`);
 
         try {
             const data = await processBatchData(processedChunks, (current, total) => {
                 const percent = Math.round((current / total) * 100);
                 setProgress(percent);
-                setProcessingStatus(`DeepSeek đang xử lý phần ${current}/${total} (${percent}%)`);
+                setProcessingStatus(`Gemini Pro/Flash đang xử lý phần ${current}/${total} (${percent}%)`);
             });
             
             setOpeningBalance(data.openingBalance?.toString() ?? '0');
@@ -334,10 +320,10 @@ export default function App() {
             <div className="max-w-7xl mx-auto">
                 <header className="text-center mb-8">
                     <h1 className="text-3xl sm:text-4xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-blue-500 to-teal-400">
-                        Chuyển Đổi Sổ Phụ Ngân Hàng (DeepSeek)
+                        Chuyển Đổi Sổ Phụ Ngân Hàng (Gemini Pro)
                     </h1>
                     <p className="mt-2 text-gray-600 dark:text-gray-400 flex items-center justify-center gap-2">
-                        <span>Upload sao kê (Excel, PDF, Ảnh). DeepSeek Engine V3.</span>
+                        <span>Upload sao kê. Powered by Google Gemini Pro (Waterfall Fallback).</span>
                         <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200 border border-purple-200 dark:border-purple-700">
                             Version {CURRENT_VERSION}
                         </span>
@@ -422,8 +408,6 @@ export default function App() {
                                         <option value="500">Tự động: 500 dòng/phần (Khuyên dùng)</option>
                                         <option value="ALL">Gửi toàn bộ (1 phần duy nhất)</option>
                                         <option value="200">Chia nhỏ: 200 dòng/phần</option>
-                                        <option value="100">Chia nhỏ: 100 dòng/phần</option>
-                                        <option value="50">Chia nhỏ: 50 dòng/phần (Debug)</option>
                                     </select>
                                 </div>
 
@@ -490,7 +474,7 @@ export default function App() {
                         {isLoading && loadingState === 'processing' && (
                             <div className="mt-4">
                                 <div className="flex justify-between text-xs text-gray-500 mb-1">
-                                    <span>Tiến trình xử lý DeepSeek</span>
+                                    <span>Tiến trình xử lý Gemini</span>
                                     <span>{Math.round(progress)}%</span>
                                 </div>
                                 <div className="w-full bg-gray-200 rounded-full h-3 dark:bg-gray-700 overflow-hidden">
@@ -507,31 +491,27 @@ export default function App() {
                                  disabled={isLoading || processedChunks.length === 0}
                                  className="w-full flex items-center justify-center px-6 py-3 border border-transparent text-base font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:bg-green-400 disabled:cursor-not-allowed transition-colors"
                              >
-                                 {loadingState === 'processing' ? <><ProcessIcon /> Đang xử lý tuần tự (DeepSeek)...</> : '5. Bắt đầu Xử lý (DeepSeek)'}
+                                 {loadingState === 'processing' ? <><ProcessIcon /> Đang xử lý (Gemini Pro)...</> : '5. Bắt đầu Xử lý (Gemini Pro)'}
                              </button>
                          </div>
                     </div>
 
                     <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg">
                         <h2 className="text-2xl font-bold mb-4 flex items-baseline">
-                            Quy trình Batch Processing (DeepSeek)
+                            Quy trình (Gemini Waterfall)
                         </h2>
                         <ul className="space-y-4 text-gray-600 dark:text-gray-400">
                             <li className="flex items-start">
                                 <span className="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-indigo-500 text-white font-bold text-sm mr-3">1</span>
-                                <span><b>Chia nhỏ & OCR:</b> Dữ liệu Excel/CSV được chia theo cấu hình bạn chọn (Mặc định 500 dòng). Header luôn được giữ.</span>
+                                <span><b>Chia nhỏ & OCR:</b> Sử dụng Gemini Flash để đọc ảnh/PDF cực nhanh.</span>
                             </li>
                             <li className="flex items-start">
                                 <span className="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-purple-500 text-white font-bold text-sm mr-3">2</span>
-                                <span><b>DeepSeek Engine:</b> Dữ liệu được gửi tới DeepSeek V3 để phân tích và trích xuất JSON.</span>
+                                <span><b>Gemini 3 Pro:</b> Model chính xử lý Logic kế toán. Nếu hết Quota, tự động chuyển sang Flash, sau đó thử Key tiếp theo.</span>
                             </li>
                              <li className="flex items-start">
                                 <span className="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-indigo-500 text-white font-bold text-sm mr-3">3</span>
-                                <span><b>Gộp (Merging):</b> Kết quả được ghép lại và kiểm tra cân đối.</span>
-                            </li>
-                            <li className="flex items-start">
-                                <span className="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-green-500 text-white font-bold text-sm mr-3">4</span>
-                                <span><b>Hoàn tất:</b> Bảng kê chi tiết sẵn sàng tải về.</span>
+                                <span><b>Hoàn tất:</b> Tự động tổng hợp và kiểm tra cân đối.</span>
                             </li>
                         </ul>
                     </div>
