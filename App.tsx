@@ -153,7 +153,10 @@ export default function App() {
                         chunkSize = isNaN(parsed) || parsed <= 0 ? 500 : parsed;
                     }
 
-                    const HEADER_ROWS = 5; // Giữ lại 5 dòng đầu làm header cho mỗi chunk
+                    // --- CẬP NHẬT v1.2.5: Tăng Header Context ---
+                    // Nhiều file Excel có header nằm ở dòng 10-15. 5 dòng là không đủ.
+                    // Tăng lên 20 dòng để đảm bảo các chunk sau luôn có tiêu đề cột tham chiếu.
+                    const HEADER_ROWS = 20; 
                     const header = lines.slice(0, HEADER_ROWS).join('\n');
                     
                     // Nếu gửi toàn bộ hoặc file quá ngắn

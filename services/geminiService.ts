@@ -50,7 +50,53 @@ const callWithRetry = async <T>(fn: () => Promise<T>, retries = 3, delayMs = 200
     }
 };
 
-// --- HELPER: JSON CLEANER & PARSER ---
+// --- HELPER: JSON REPAIR & PARSER ---
+
+/**
+ * Cố gắng sửa chuỗi JSON bị cắt cụt (Truncated JSON).
+ * Thường xảy ra khi AI trả về dữ liệu quá dài và bị ngắt giữa chừng.
+ */
+const repairTruncatedJSON = (jsonStr: string): string => {
+    let repaired = jsonStr.trim();
+
+    // 1. Nếu kết thúc bằng dấu phẩy, xóa nó
+    if (repaired.endsWith(',')) {
+        repaired = repaired.slice(0, -1);
+    }
+
+    // 2. Tìm vị trí đóng của transactions array nếu có
+    // Giả sử cấu trúc: { ..., "transactions": [ {..}, {..} <BỊ CẮT>
+    if (!repaired.endsWith('}')) {
+        // Tìm transaction hoàn chỉnh cuối cùng (kết thúc bằng "},")
+        const lastValidObjIndex = repaired.lastIndexOf('},');
+        if (lastValidObjIndex !== -1) {
+            // Cắt bỏ phần thừa sau dấu phẩy cuối cùng
+            repaired = repaired.substring(0, lastValidObjIndex + 1);
+            // Đóng mảng và đóng object cha
+            repaired += ']}';
+            return repaired;
+        }
+        
+        // Trường hợp khác: Cắt tại dấu đóng ngoặc nhọn cuối cùng tìm thấy
+        const lastCurly = repaired.lastIndexOf('}');
+        if (lastCurly !== -1) {
+            repaired = repaired.substring(0, lastCurly + 1);
+            // Kiểm tra xem cần đóng gì thêm không (đếm ngoặc)
+            const openBraces = (repaired.match(/\{/g) || []).length;
+            const closeBraces = (repaired.match(/\}/g) || []).length;
+            const openBrackets = (repaired.match(/\[/g) || []).length;
+            const closeBrackets = (repaired.match(/\]/g) || []).length;
+
+            if (openBrackets > closeBrackets) repaired += ']';
+            if (openBraces > closeBraces) repaired += '}';
+            
+            return repaired;
+        }
+    }
+
+    return repaired;
+};
+
 const cleanAndParseJSON = <T>(text: string | undefined | null): T => {
     if (!text || typeof text !== 'string' || text.trim() === '') {
         throw new Error("AI trả về dữ liệu rỗng.");
@@ -59,21 +105,44 @@ const cleanAndParseJSON = <T>(text: string | undefined | null): T => {
     const repairSyntax = (str: string): string => {
         let fixed = str;
         fixed = fixed.replace(/```json/g, "").replace(/```/g, "");
-        fixed = fixed.replace(/\/\/.*$/gm, "");
+        fixed = fixed.replace(/\/\/.*$/gm, ""); // Remove comments
         return fixed.trim();
     };
 
+    let cleaned = repairSyntax(text);
+
+    // Cách 1: Parse trực tiếp
     try {
-        const cleaned = repairSyntax(text);
+        return JSON.parse(cleaned) as T;
+    } catch (e1) {
+        // Cách 2: Tìm JSON object đầu tiên và cuối cùng
         const firstOpen = cleaned.indexOf('{');
         const lastClose = cleaned.lastIndexOf('}');
+        
         if (firstOpen !== -1 && lastClose > firstOpen) {
-            return JSON.parse(cleaned.substring(firstOpen, lastClose + 1)) as T;
+            const candidate = cleaned.substring(firstOpen, lastClose + 1);
+            try {
+                return JSON.parse(candidate) as T;
+            } catch (e2) {
+                // Cách 3: Thử sửa lỗi Truncated JSON
+                console.warn("JSON Parse Failed. Attempting repair on truncated data...");
+                const repaired = repairTruncatedJSON(candidate);
+                try {
+                    return JSON.parse(repaired) as T;
+                } catch (e3) {
+                    // console.error("Repair Failed:", repaired);
+                    throw new Error(`Lỗi cấu trúc JSON (Dữ liệu quá lớn hoặc bị lỗi). Original Error: ${(e1 as Error).message}`);
+                }
+            }
         }
-        return JSON.parse(cleaned) as T;
-    } catch (e) {
-        console.error("JSON Parse Error. Raw Text:", text);
-        throw new Error(`Lỗi đọc dữ liệu từ AI: ${(e as Error).message}. Text: ${text.substring(0, 100)}...`);
+        
+        // Nếu không tìm thấy cặp ngoặc {}, thử sửa toàn bộ chuỗi
+        try {
+             const repairedAll = repairTruncatedJSON(cleaned);
+             return JSON.parse(repairedAll) as T;
+        } catch (e4) {
+             throw new Error(`Không thể đọc dữ liệu từ AI: ${(e1 as Error).message}`);
+        }
     }
 };
 
@@ -149,9 +218,9 @@ const callAI = async (messages: Array<{role: string, content: string}>, jsonMode
 
             const result = await ai.models.generateContent({
                 model: 'gemini-2.5-flash',
-                systemInstruction: systemInstruction,
                 contents: geminiContents,
                 config: {
+                    systemInstruction: systemInstruction,
                     responseMimeType: jsonMode ? "application/json" : "text/plain",
                     temperature: 0.1
                 }
@@ -196,44 +265,39 @@ export const extractTextFromContent = async (content: { images: { mimeType: stri
  */
 export const processStatement = async (content: { text: string; }, isPartial: boolean = false): Promise<GeminiResponse> => {
     const systemPrompt = `Bạn là Chuyên gia Xử lý Dữ liệu Kế toán (AI Engine).
-    Nhiệm vụ: Chuyển đổi văn bản sao kê ngân hàng (Text/CSV) thành JSON chuẩn.
+    Nhiệm vụ: Chuyển đổi văn bản sao kê ngân hàng thành JSON chuẩn.
 
     HƯỚNG DẪN XỬ LÝ QUAN TRỌNG:
-    1.  **Nhận diện cột:** Tìm các cột: "Ngày" (Date), "Mã GD" (TransID), "Nội dung" (Desc), "Ghi Nợ/Debit/Số tiền chi" (Tiền ra), "Ghi Có/Credit/Số tiền thu" (Tiền vào).
-    2.  **Logic Nợ/Có:**
-        -   Nếu dòng có giá trị ở cột "Nợ" (hoặc dấu âm '-'), gán vào field 'debit'.
-        -   Nếu dòng có giá trị ở cột "Có" (hoặc dấu dương '+'), gán vào field 'credit'.
-        -   Nếu chỉ có 1 cột "Số tiền" và cột "Loại GD": Loại "Chi/Rút/Phí" là 'debit', loại "Nhận/Nộp" là 'credit'.
-    3.  **Xử lý HEADER CONTEXT:**
-        -   Nếu thấy đoạn '--- CONTEXT HEADER ... ---', ĐÓ LÀ TIÊU ĐỀ CỘT DÙNG ĐỂ THAM CHIẾU.
-        -   Dùng nó để hiểu ý nghĩa các cột bên dưới.
-        -   **TUYỆT ĐỐI KHÔNG** trích xuất dòng header này vào danh sách 'transactions'.
-    4.  **Bỏ qua dòng rác:** Bỏ qua các dòng: "Số dư đầu kỳ", "Cộng trang", "Số dư cuối kỳ", "Page x/y", Header lặp lại.
-    5.  **Định dạng số:** Tự động phát hiện dấu phân cách ngàn (.) hay thập phân (,). Ví dụ: "1.000.000" là 1 triệu. "1,000.00" là 1 ngàn.
-    6.  **Trường hợp rỗng:** Nếu không tìm thấy giao dịch nào, trả về mảng rỗng [], KHÔNG ĐƯỢC BỊA ĐẶT.
+    1.  **Input Format:** Đầu vào có thể là văn bản thô HOẶC một cấu trúc JSON có sẵn (ví dụ: snake_case như 'debit_amount', 'credit_amount').
+        - Nếu đầu vào đã là JSON: Hãy MAP (ánh xạ) các trường đó sang SCHEMA CHUẨN của tôi (camelCase).
+        - Ví dụ: 'debit_amount' -> 'debit', 'credit_amount' -> 'credit', 'transaction_date' -> 'date'.
 
-    SCHEMA JSON OUTPUT:
+    2.  **Nhận diện bảng (Anchor Detection):**
+        -   Quét từ trên xuống. Bắt đầu lấy dữ liệu khi thấy dòng có Ngày tháng hoặc Số tiền.
+        -   Bỏ qua header rác.
+
+    3.  **Logic Gộp dòng (Multiline Merge):**
+        -   Gộp các dòng mô tả không có ngày tháng vào giao dịch trước đó.
+
+    SCHEMA JSON OUTPUT (BẮT BUỘC):
     {
-        "openingBalance": number, // Tìm dòng "Số dư đầu kỳ" hoặc "SỐ DƯ ĐẦU" nếu có (nếu không thì 0)
-        "endingBalance": number, // Tìm dòng "Số dư cuối kỳ" nếu có
-        "accountInfo": { 
-            "accountName": "Tên chủ tài khoản (nếu thấy)", 
-            "accountNumber": "Số tài khoản (nếu thấy)", 
-            "bankName": "Tên ngân hàng (nếu thấy)", 
-            "branch": "Chi nhánh (nếu thấy)" 
-        },
+        "openingBalance": number, // 0 nếu không thấy
+        "endingBalance": number, // 0 nếu không thấy
+        "accountInfo": { "accountName": "", "accountNumber": "", "bankName": "", "branch": "" },
         "transactions": [
             { 
-                "transactionCode": "string (Mã tham chiếu/FT/BNK...)", 
+                "transactionCode": "string", 
                 "date": "DD/MM/YYYY", 
-                "description": "string (Nội dung diễn giải)", 
-                "debit": number (Số tiền ghi Nợ/Rút/Phí - luôn dương), 
-                "credit": number (Số tiền ghi Có/Nhận - luôn dương), 
-                "fee": number (Nếu tách riêng được phí), 
-                "vat": number (Nếu tách riêng được VAT) 
+                "description": "string", 
+                "debit": number (Luôn dương), 
+                "credit": number (Luôn dương), 
+                "fee": number, 
+                "vat": number 
             }
         ]
-    }`;
+    }
+    
+    LƯU Ý CUỐI: Trả về JSON Minified (không xuống dòng thừa) để tiết kiệm token.`;
 
     const userPrompt = `Dữ liệu sao kê cần xử lý:\n\n${content.text}`;
 
