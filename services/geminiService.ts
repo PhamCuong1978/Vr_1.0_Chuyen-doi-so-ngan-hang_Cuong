@@ -177,8 +177,6 @@ const callGoogleAI = async (apiKey: string, model: string, config: AIRequestConf
             systemInstruction: systemInstruction,
             responseMimeType: config.jsonMode ? "application/json" : "text/plain",
             temperature: 0.1,
-            // Với Flash model, có thể không cần thinking, nhưng Pro có thể cần.
-            // Để đơn giản, ta không set thinkingConfig trừ khi cần thiết.
         }
     });
 
@@ -194,16 +192,21 @@ const callAIUnified = async (messages: Array<{role: string, content: string}>, j
 
     let lastError: any = null;
 
-    // VÒNG LẶP XOAY VÒNG KEY
-    for (let i = 0; i < keys.length; i++) {
-        const currentKey = keys[i];
-        
-        // CHIẾN LƯỢC WATERFALL: Thử Pro -> Nếu 429/503 thì thử Flash
-        const modelsToTry = [PRO_MODEL, FLASH_MODEL];
-        
-        for (const model of modelsToTry) {
+    // CHIẾN LƯỢC MỚI: Priority Models -> Priority Keys
+    // Quy trình:
+    // 1. Thử Model PRO với Key 1, Key 2, Key 3...
+    // 2. Nếu tất cả Key đều fail với PRO (do hết Quota), chuyển sang FLASH.
+    // 3. Thử Model FLASH với Key 1, Key 2, Key 3...
+    
+    const modelsToTry = [PRO_MODEL, FLASH_MODEL];
+
+    for (const model of modelsToTry) {
+        let modelFailedAllKeys = true;
+
+        for (let i = 0; i < keys.length; i++) {
+            const currentKey = keys[i];
             try {
-                // console.log(`Attempting with Key [${i}] (${currentKey.substring(0, 5)}...) and Model [${model}]`);
+                // console.log(`Attempting Model [${model}] with Key index [${i}]`);
                 return await callGoogleAI(currentKey, model, { messages, jsonMode });
             } catch (err: any) {
                 const errorMessage = String(err).toLowerCase();
@@ -216,8 +219,8 @@ const callAIUnified = async (messages: Array<{role: string, content: string}>, j
                 lastError = err;
 
                 if (isQuotaError) {
-                    console.warn(`⚠️ Key [${i}] Model [${model}] bị hết Quota hoặc quá tải. Đang thử phương án tiếp theo...`);
-                    // Tiếp tục vòng lặp model (để fallback xuống Flash), sau đó tiếp tục vòng lặp key
+                    console.warn(`⚠️ Model [${model}] Key [${i}] bị hết Quota/Overloaded. Thử Key tiếp theo...`);
+                    // Tiếp tục vòng lặp keys
                     continue; 
                 } else {
                     // Nếu lỗi khác (ví dụ 400 Bad Request, Parse Error), throw ngay lập tức vì đổi key cũng không sửa được
@@ -225,10 +228,13 @@ const callAIUnified = async (messages: Array<{role: string, content: string}>, j
                     throw err; 
                 }
             }
+            // Nếu thành công, return sẽ thoát khỏi hàm, không chạy xuống đây.
         }
+        
+        console.warn(`⚠️ Đã thử tất cả Key với Model [${model}] nhưng thất bại (Quota). Đang chuyển sang Model tiếp theo (nếu có)...`);
     }
 
-    throw new Error(`Tất cả các Key AI đều đã hết hạn mức hoặc gặp lỗi. Vui lòng thử lại sau giây lát. Lỗi cuối cùng: ${lastError?.message}`);
+    throw new Error(`Tất cả các Key & Model đều thất bại. Vui lòng thử lại sau giây lát. Lỗi cuối cùng: ${lastError?.message}`);
 };
 
 /**
@@ -282,7 +288,15 @@ export const processStatement = async (content: { text: string; }, isPartial: bo
     - Số âm (-): Tiền ra -> JSON 'credit'.
     - Số dương (+): Tiền vào -> JSON 'debit'.
 
-    ### 3. CẤU TRÚC JSON OUTPUT:
+    ### 3. XỬ LÝ PHÍ (QUAN TRỌNG - TRÁNH DUPLICATE):
+    - Nếu dòng giao dịch là **PHÍ** (Ví dụ: Nội dung chứa "Thu phí dịch vụ", "Phí SMS", "Phí quản lý", v.v.):
+       - Số tiền phải được điền vào **'credit'** (Tiền ra).
+       - Trường **'fee' phải bằng 0** (Trừ khi trên sao kê CÓ CỘT PHÍ RIÊNG BIỆT tách khỏi cột số tiền giao dịch).
+       - **KHÔNG ĐƯỢC** điền số tiền vừa vào 'credit' vừa vào 'fee'.
+       - Ví dụ đúng: { "description": "THU PHI SMS", "credit": 22000, "fee": 0 }
+       - Ví dụ SAI: { "description": "THU PHI SMS", "credit": 22000, "fee": 22000 } (Vì điều này sẽ làm tổng tiền ra bị tính thành 44000).
+
+    ### 4. CẤU TRÚC JSON OUTPUT:
     {
         "openingBalance": number, 
         "endingBalance": number,
@@ -293,8 +307,8 @@ export const processStatement = async (content: { text: string; }, isPartial: bo
                 "date": "DD/MM/YYYY", 
                 "description": "string (Đã sanitize)", 
                 "debit": number (Tiền vào/Tăng), 
-                "credit": number (Tiền ra/Giảm), 
-                "fee": number, 
+                "credit": number (Tiền ra/Giảm - Bao gồm cả phí nếu đó là dòng phí), 
+                "fee": number (Chỉ điền nếu là cột riêng biệt, còn không thì để 0), 
                 "vat": number 
             }
         ]

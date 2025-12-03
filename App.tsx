@@ -507,7 +507,7 @@ export default function App() {
                             </li>
                             <li className="flex items-start">
                                 <span className="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-purple-500 text-white font-bold text-sm mr-3">2</span>
-                                <span><b>Gemini 3 Pro:</b> Model chính xử lý Logic kế toán. Nếu hết Quota, tự động chuyển sang Flash, sau đó thử Key tiếp theo.</span>
+                                <span><b>Gemini 3 Pro:</b> Ưu tiên chạy Pro trên tất cả Key. Nếu tất cả đều hết Quota, tự động chuyển sang Flash.</span>
                             </li>
                              <li className="flex items-start">
                                 <span className="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-indigo-500 text-white font-bold text-sm mr-3">3</span>
