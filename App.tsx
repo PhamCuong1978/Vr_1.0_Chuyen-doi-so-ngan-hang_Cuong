@@ -339,7 +339,7 @@ export default function App() {
                             {/* BƯỚC 1: UPLOAD FILE */}
                             <div className="mb-6">
                                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                                    1. Upload file Sao kê (Excel/Word/PDF/Ảnh)
+                                    1. Upload file Sao kê (Excel/Word/PDF/JSON/Ảnh)
                                 </label>
                                 
                                 {selectedFiles.length > 0 && (
@@ -371,9 +371,9 @@ export default function App() {
                                     <label htmlFor="file-upload" className={`relative cursor-pointer bg-white dark:bg-gray-700 rounded-md font-medium text-indigo-600 dark:text-indigo-400 hover:text-indigo-500 focus-within:outline-none focus-within:ring-2 focus-within:ring-offset-2 focus-within:ring-indigo-500 border-2 border-dashed border-gray-300 dark:border-gray-600 flex flex-col items-center justify-center ${selectedFiles.length > 0 ? 'p-4' : 'p-6'} hover:border-indigo-500 dark:hover:border-indigo-400 transition-colors`}>
                                         <div className="flex items-center space-x-2">
                                             <UploadIcon/>
-                                            <span className="text-sm">{selectedFiles.length > 0 ? 'Thêm file khác' : 'Chọn tệp (Excel, Word, PDF, Ảnh)'}</span>
+                                            <span className="text-sm">{selectedFiles.length > 0 ? 'Thêm file khác' : 'Chọn tệp (Excel, Word, PDF, JSON, Ảnh)'}</span>
                                         </div>
-                                        <input id="file-upload" name="file-upload" type="file" className="sr-only" onChange={handleFileChange} accept=".pdf,.docx,.xlsx,.xls,.txt,.csv,.png,.jpg,.jpeg,.bmp" multiple/>
+                                        <input id="file-upload" name="file-upload" type="file" className="sr-only" onChange={handleFileChange} accept=".pdf,.docx,.xlsx,.xls,.txt,.csv,.json,.png,.jpg,.jpeg,.bmp" multiple/>
                                     </label>
                                     
                                     {uploadState === 'uploading' && (
