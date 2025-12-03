@@ -165,7 +165,8 @@ export default function App() {
                         // FIX BUG: Vòng lặp an toàn
                         for (let i = 0; i < body.length; i += chunkSize) {
                             const chunkBody = body.slice(i, i + chunkSize).join('\n');
-                            const chunkContent = `--- CONTEXT HEADER (DO NOT PROCESS, JUST REFERENCE) ---\n${header}\n\n--- DATA PART ${Math.floor(i/chunkSize) + 1} ---\n${chunkBody}`;
+                            // FORMAT RÕ RÀNG HƠN CHO AI
+                            const chunkContent = `--- CONTEXT HEADER (REFERENCE ONLY - DO NOT EXTRACT) ---\n${header}\n--------------------------------------------------------\n\n--- DATA PART ${Math.floor(i/chunkSize) + 1} (EXTRACT THIS) ---\n${chunkBody}`;
                             allChunks.push({ type: 'text', data: chunkContent });
                         }
                     }
