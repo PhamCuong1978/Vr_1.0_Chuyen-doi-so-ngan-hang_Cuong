@@ -2,21 +2,26 @@ import { GoogleGenAI, Type } from "@google/genai";
 import type { GeminiResponse, AIChatResponse, ChatMessage, Transaction } from '../types';
 
 // --- HELPER: Safe Env Getter ---
+// FIX VERCEL DEPLOYMENT ISSUE:
+// Trên Vercel/Vite production, việc truy cập động key (ví dụ: import.meta.env[key]) thường trả về undefined
+// do cơ chế static replacement của bundler. Ta phải truy cập trực tiếp tên biến.
 const getEnvVar = (key: string): string | undefined => {
+    // 1. Ưu tiên lấy từ window.process (đã được polyfill ở index.tsx)
     if (typeof window !== 'undefined' && (window as any).process?.env?.[key]) {
         return (window as any).process.env[key];
     }
+
+    // 2. Fallback: Kiểm tra trực tiếp import.meta.env cho các key cụ thể
+    // Bắt buộc phải viết rõ tên biến "VITE_..." để Vite replacement hoạt động
     try {
-        if (typeof process !== 'undefined' && process.env?.[key]) {
-            return process.env[key];
+        if (key === 'API_KEY') {
+            return import.meta.env.VITE_API_KEY || import.meta.env.API_KEY;
+        }
+        if (key === 'DEEPSEEK_API_KEY') {
+            return import.meta.env.VITE_DEEPSEEK_API_KEY || import.meta.env.DEEPSEEK_API_KEY;
         }
     } catch (e) {}
-    try {
-        const metaEnv = (import.meta as any).env;
-        if (metaEnv) {
-            return metaEnv[key] || metaEnv[`VITE_${key}`];
-        }
-    } catch (e) {}
+    
     return undefined;
 };
 
@@ -241,7 +246,7 @@ const callAI = async (messages: Array<{role: string, content: string}>, jsonMode
         });
     }
 
-    throw new Error("Chưa cấu hình API Key. Vui lòng thêm DEEPSEEK_API_KEY (ưu tiên) hoặc API_KEY (Google) vào biến môi trường.");
+    throw new Error("Chưa cấu hình API Key. Vui lòng thêm VITE_API_KEY vào biến môi trường trên Vercel.");
 };
 
 /**
