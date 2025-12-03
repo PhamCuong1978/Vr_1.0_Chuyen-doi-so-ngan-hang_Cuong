@@ -44,10 +44,16 @@ const callWithRetry = async <T>(fn: () => Promise<T>, retries = 3, delayMs = 200
         return await fn();
     } catch (error: any) {
         const errorMessage = typeof error === 'object' ? JSON.stringify(error) : String(error);
+        // Add specific checks for RPC/Network errors
+        const isNetworkError = errorMessage.toLowerCase().includes('rpc failed') || 
+                               errorMessage.toLowerCase().includes('xhr error') || 
+                               errorMessage.includes('500') ||
+                               errorMessage.includes('fetch failed');
+                               
         const isServerBusy = errorMessage.includes('503') || errorMessage.includes('429') || errorMessage.includes('Overloaded');
         
-        if (retries > 0 && isServerBusy) {
-            console.warn(`⚠️ API Busy. Retrying in ${delayMs/1000}s... (${retries} left)`);
+        if (retries > 0 && (isServerBusy || isNetworkError)) {
+            console.warn(`⚠️ API Error (${isNetworkError ? 'Network' : 'Busy'}). Retrying in ${delayMs/1000}s... (${retries} left)`);
             await delay(delayMs);
             return callWithRetry(fn, retries - 1, delayMs * 2); 
         }
@@ -58,7 +64,8 @@ const callWithRetry = async <T>(fn: () => Promise<T>, retries = 3, delayMs = 200
 // --- HELPER: JSON REPAIR & PARSER ---
 
 /**
- * Hàm sửa lỗi JSON mạnh mẽ: Xử lý cắt cụt, thừa dấu phẩy, thiếu ngoặc kép cho key...
+ * Hàm sửa lỗi JSON mạnh mẽ: Xử lý cắt cụt, thừa dấu phẩy, key không ngoặc kép.
+ * Cập nhật v1.3.0: Smart Key Repair (tránh replace nhầm trong string).
  */
 const robustJSONRepair = (jsonStr: string): string => {
     let repaired = jsonStr.trim();
@@ -66,48 +73,104 @@ const robustJSONRepair = (jsonStr: string): string => {
     // 0. Fix smart quotes (dấu ngoặc kép cong) thành dấu ngoặc kép thẳng chuẩn JSON
     repaired = repaired.replace(/[\u201C\u201D]/g, '"');
 
-    // 1. Nếu kết thúc bằng dấu phẩy, xóa nó
-    if (repaired.endsWith(',')) {
-        repaired = repaired.slice(0, -1);
+    // --- SMART REPAIR: Fix Unquoted Keys (SAFE MODE) ---
+    // Chỉ replace key khi NẰM NGOÀI chuỗi string giá trị (để tránh lỗi description chứa ":")
+    // Logic: Duyệt chuỗi, xác định vùng "Trong String" và "Ngoài String". 
+    // Chỉ regex replace vùng "Ngoài String".
+    try {
+        let segments: string[] = [];
+        let currentSegment = '';
+        let inString = false;
+        let i = 0;
+        
+        while (i < repaired.length) {
+            const char = repaired[i];
+            
+            if (char === '"') {
+                // Kiểm tra escaped quote: đếm số dấu \ liên tiếp trước nó
+                let backslashCount = 0;
+                let j = i - 1;
+                while (j >= 0 && repaired[j] === '\\') {
+                    backslashCount++;
+                    j--;
+                }
+                
+                const isEscaped = backslashCount % 2 !== 0;
+                
+                if (!isEscaped) {
+                    if (!inString) {
+                        // Bắt đầu string -> Đẩy phần text trước đó vào segment
+                        segments.push(currentSegment); // Đây là Non-String
+                        currentSegment = '"';
+                        inString = true;
+                    } else {
+                        // Kết thúc string -> Đẩy phần string này vào segment
+                        currentSegment += '"';
+                        segments.push(currentSegment); // Đây là String
+                        currentSegment = '';
+                        inString = false;
+                    }
+                } else {
+                    currentSegment += char;
+                }
+            } else {
+                currentSegment += char;
+            }
+            i++;
+        }
+        segments.push(currentSegment); // Đẩy phần còn lại
+
+        // Reassemble với Regex Fix trên các phần Non-String
+        repaired = segments.map((seg, index) => {
+            // Phần chẵn là Non-String (0, 2, 4...), phần lẻ là String (1, 3, 5...)
+            // Lưu ý: Logic trên đẩy lần lượt. Cần kiểm tra kỹ.
+            // Đoạn code trên: 
+            // - Start: inString=false. currentSegment="...". Gặp ". Push "..." (NonString).
+            // - inString=true. currentSegment='"...'. Gặp ". Push '"..."' (String).
+            // - inString=false.
+            // => Check bằng cách xem ký tự đầu có phải " không? (Nếu JSON chuẩn, string luôn bắt đầu bằng ")
+            // Tuy nhiên, để chắc chắn, ta dùng biến boolean toggle khi map hoặc check ký tự đầu.
+            // Đơn giản hơn: những đoạn KHÔNG bắt đầu bằng " (hoặc rỗng) là Non-String. 
+            // (Ngoại trừ trường hợp JSON bắt đầu bằng " -> mảng string, nhưng hiếm khi lỗi key ở đó).
+            // Với structure {...}, đoạn đầu tiên luôn là Non-String.
+            
+            const isStringSegment = seg.trim().startsWith('"') && seg.trim().endsWith('"');
+            
+            if (!isStringSegment) {
+                // Fix Unquoted Keys: { key: -> { "key":
+                // Fix Trailing Commas: , } -> }
+                let fixed = seg;
+                fixed = fixed.replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":');
+                fixed = fixed.replace(/,(\s*[}\]])/g, '$1');
+                return fixed;
+            }
+            return seg;
+        }).join('');
+        
+    } catch (e) {
+        console.warn("Smart Repair Failed, falling back to basic replace.", e);
+        // Fallback nhẹ nếu logic trên fail
+        repaired = repaired.replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":');
     }
 
-    // 2. Xử lý Truncated JSON (Bị cắt cụt)
-    // Giả sử cấu trúc: { ..., "transactions": [ {..}, {..} <BỊ CẮT>
-    if (!repaired.endsWith('}')) {
-        // Tìm transaction hoàn chỉnh cuối cùng (kết thúc bằng "},")
-        const lastValidObjIndex = repaired.lastIndexOf('},');
-        if (lastValidObjIndex !== -1) {
-            // Cắt bỏ phần thừa sau dấu phẩy cuối cùng
-            repaired = repaired.substring(0, lastValidObjIndex + 1);
-            // Đóng mảng và đóng object cha
-            repaired += ']}';
-        } else {
-            // Trường hợp khác: Cắt tại dấu đóng ngoặc nhọn cuối cùng tìm thấy
-            const lastCurly = repaired.lastIndexOf('}');
-            if (lastCurly !== -1) {
-                repaired = repaired.substring(0, lastCurly + 1);
-                // Kiểm tra xem cần đóng gì thêm không (đếm ngoặc)
-                const openBraces = (repaired.match(/\{/g) || []).length;
-                const closeBraces = (repaired.match(/\}/g) || []).length;
-                const openBrackets = (repaired.match(/\[/g) || []).length;
-                const closeBrackets = (repaired.match(/\]/g) || []).length;
+    // 1. Kiểm tra cắt cụt (Truncation)
+    const hasClosingRoot = repaired.endsWith('}');
+    const transactionsIndex = repaired.indexOf('"transactions"');
 
-                if (openBrackets > closeBrackets) repaired += ']';
-                if (openBraces > closeBraces) repaired += '}';
-            }
+    if (!hasClosingRoot && transactionsIndex !== -1) {
+        const lastItemEnd = repaired.lastIndexOf('},');
+        if (lastItemEnd > transactionsIndex) {
+            repaired = repaired.substring(0, lastItemEnd + 1) + ']}';
+        } else {
+             const lastBrace = repaired.lastIndexOf('}');
+             if (lastBrace > transactionsIndex) {
+                 repaired = repaired.substring(0, lastBrace + 1) + ']}';
+             }
         }
     }
 
-    // 3. Fix trailing commas (dấu phẩy thừa trước dấu đóng ngoặc)
-    // VD: { "a": 1, } -> { "a": 1 }
-    // VD: [ 1, 2, ] -> [ 1, 2 ]
+    // Fix trailing commas lần cuối (để chắc chắn)
     repaired = repaired.replace(/,(\s*[}\]])/g, '$1');
-
-    // 4. Fix unquoted keys (key không có ngoặc kép) - Common issue with some LLMs
-    // Regex: Tìm các từ (word characters) đứng trước dấu hai chấm, mà chưa được bao bởi ngoặc kép
-    // Lưu ý: Regex này đơn giản, có thể match sai nếu key chứa ký tự đặc biệt, nhưng đủ cho key thông thường (camelCase/snake_case)
-    // Loại trừ trường hợp đã có ngoặc kép: "(.*?)":
-    repaired = repaired.replace(/([{,]\s*)([a-zA-Z0-9_]+?)\s*:/g, '$1"$2":');
 
     return repaired;
 };
@@ -132,10 +195,13 @@ const cleanAndParseJSON = <T>(text: string | undefined | null): T => {
     } catch (e1) {
         // Cách 2: Tìm JSON object đầu tiên và cuối cùng
         const firstOpen = cleaned.indexOf('{');
-        const lastClose = cleaned.lastIndexOf('}');
+        // Lưu ý: lastIndexOf có thể tìm thấy '}' của một object con nếu bị cắt cụt.
+        // Tuy nhiên, robustJSONRepair sẽ xử lý việc đó.
         
-        if (firstOpen !== -1 && lastClose > firstOpen) {
-            const candidate = cleaned.substring(firstOpen, lastClose + 1);
+        if (firstOpen !== -1) {
+             // Lấy substring từ '{' đầu tiên đến hết chuỗi (để robustJSONRepair xử lý đoạn đuôi)
+            const candidate = cleaned.substring(firstOpen);
+            
             try {
                 return JSON.parse(candidate) as T;
             } catch (e2) {
@@ -145,20 +211,13 @@ const cleanAndParseJSON = <T>(text: string | undefined | null): T => {
                 try {
                     return JSON.parse(repaired) as T;
                 } catch (e3) {
-                    console.error("Repair Failed. Original:", candidate);
-                    console.error("Repaired:", repaired);
-                    throw new Error(`Lỗi cấu trúc JSON (Dữ liệu quá lớn hoặc bị lỗi). Original Error: ${(e1 as Error).message}`);
+                    console.error("Repair Failed. Repaired String:", repaired);
+                    throw new Error(`Lỗi cấu trúc JSON (Dữ liệu bị lỗi hoặc AI trả về sai format). Original Error: ${(e1 as Error).message}`);
                 }
             }
         }
         
-        // Nếu không tìm thấy cặp ngoặc {} rõ ràng, thử sửa toàn bộ chuỗi
-        try {
-             const repairedAll = robustJSONRepair(cleaned);
-             return JSON.parse(repairedAll) as T;
-        } catch (e4) {
-             throw new Error(`Không thể đọc dữ liệu từ AI: ${(e1 as Error).message}`);
-        }
+        throw new Error(`Không tìm thấy cấu trúc JSON hợp lệ.`);
     }
 };
 
