@@ -1,3 +1,4 @@
+
 export interface AccountInfo {
   accountName: string;
   accountNumber: string;
@@ -41,4 +42,19 @@ export interface AIChatResponse {
     add?: Transaction; // For adding a new transaction from pasted content
     action?: 'update' | 'undo' | 'query' | 'add';
     confirmationRequired?: boolean; // Flag to indicate if the action needs user confirmation
+}
+
+// --- NEW: Chunk Management Types ---
+export interface ProcessedChunk {
+    id: string;
+    index: number;
+    type: 'text' | 'image';
+    data: string; // Full content for AI
+    previewStart: string; // First 3 lines
+    previewEnd: string; // Last 3 lines
+    isSelected: boolean;
+    status: 'idle' | 'processing' | 'completed' | 'error';
+    processingMessage?: string; // e.g., "Gemini Pro 1"
+    result?: GeminiResponse;
+    error?: string;
 }

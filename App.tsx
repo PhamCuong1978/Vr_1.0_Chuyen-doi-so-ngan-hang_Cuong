@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
-import { processBatchData, extractTextFromContent } from './services/geminiService';
-import type { Transaction, GeminiResponse } from './types';
+import { processStatement, extractTextFromContent } from './services/geminiService';
+import type { Transaction, GeminiResponse, ProcessedChunk } from './types';
 import { UploadIcon, ProcessIcon } from './components/Icons';
 import ChatAssistant from './components/ChatAssistant';
 import ResultTable from './components/ResultTable';
@@ -10,60 +10,46 @@ import { CURRENT_VERSION } from './utils/version';
 
 type LoadingState = 'idle' | 'extracting' | 'processing';
 type UploadState = 'idle' | 'uploading' | 'completed';
-type ChunkStrategy = 'ALL' | '500' | '200' | '100' | '50';
+type ChunkStrategy = 'ALL' | '1000' | '500' | '200' | '100';
 
 export default function App() {
     const [openingBalance, setOpeningBalance] = useState('');
-    const [statementContent, setStatementContent] = useState<string>(() => localStorage.getItem('statementContent') || '');
-    const [processedChunks, setProcessedChunks] = useState<{ type: 'text' | 'image', data: string }[]>([]);
+    const [chunks, setChunks] = useState<ProcessedChunk[]>([]);
     
-    // Config chia nhỏ - Gemini có context window lớn, 500 là an toàn
+    // Config chia nhỏ
     const [chunkStrategy, setChunkStrategy] = useState<ChunkStrategy>('500');
+    const [recommendedStrategy, setRecommendedStrategy] = useState<ChunkStrategy>('500');
 
     const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
-    
     const [uploadState, setUploadState] = useState<UploadState>('idle');
     const [uploadProgress, setUploadProgress] = useState(0);
 
     const [loadingState, setLoadingState] = useState<LoadingState>('idle');
-    const [progress, setProgress] = useState(0);
+    const [globalProgress, setGlobalProgress] = useState(0);
     const [processingStatus, setProcessingStatus] = useState<string>('');
-    const [activeKeyInfo, setActiveKeyInfo] = useState<string>(''); // Lưu trữ thông tin key/model đang chạy (VD: Gemini Pro 1)
+    const [activeKeyInfo, setActiveKeyInfo] = useState<string>(''); 
 
     const [error, setError] = useState<string | null>(null);
-    const [result, setResult] = useState<GeminiResponse | null>(null);
+    const [isMergedView, setIsMergedView] = useState(false);
+    const [mergedResult, setMergedResult] = useState<GeminiResponse | null>(null);
     const [balanceMismatchWarning, setBalanceMismatchWarning] = useState<string | null>(null);
-    const [history, setHistory] = useState<GeminiResponse[]>([]);
     
     const uploadInterval = useRef<number | null>(null);
-
     const isLoading = loadingState !== 'idle';
     
     useEffect(() => {
-        if (statementContent.length < 50000) {
-            localStorage.setItem('statementContent', statementContent);
-        }
-    }, [statementContent]);
-
-    useEffect(() => {
-        console.log(`App Version ${CURRENT_VERSION} Loaded - Gemini Pro Edition`);
+        console.log(`App Version ${CURRENT_VERSION} Loaded - Big Data Edition`);
         return () => {
             if (uploadInterval.current) clearInterval(uploadInterval.current);
         };
     }, []);
     
+    // --- UPLOAD HANDLERS ---
     const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
         const files = event.target.files;
         if (files && files.length > 0) {
             const newFiles = Array.from(files);
-            
-            setResult(null);
-            setStatementContent('');
-            setProcessedChunks([]); // Reset chunks
-            setBalanceMismatchWarning(null);
-            setError(null);
-            setLoadingState('idle');
-
+            resetState();
             setSelectedFiles(prev => [...prev, ...newFiles]);
             event.target.value = '';
             simulateUploadProcess();
@@ -74,15 +60,21 @@ export default function App() {
         setSelectedFiles(prev => {
             const newFiles = prev.filter((_, index) => index !== indexToRemove);
             if (newFiles.length === 0) {
+                resetState();
                 setUploadState('idle');
                 setUploadProgress(0);
-                setStatementContent('');
-                setProcessedChunks([]);
             }
             return newFiles;
         });
-        setResult(null);
-        setStatementContent('');
+    };
+
+    const resetState = () => {
+        setChunks([]);
+        setMergedResult(null);
+        setBalanceMismatchWarning(null);
+        setError(null);
+        setLoadingState('idle');
+        setIsMergedView(false);
     };
 
     const simulateUploadProcess = () => {
@@ -106,12 +98,11 @@ export default function App() {
         setSelectedFiles([]);
         setUploadState('idle');
         setUploadProgress(0);
-        setResult(null);
-        setStatementContent('');
-        setProcessedChunks([]);
+        resetState();
         setOpeningBalance('');
     };
 
+    // --- EXTRACTION LOGIC ---
     const handleExtractText = async () => {
         if (selectedFiles.length === 0) {
             setError('Vui lòng chọn file trước khi trích xuất.');
@@ -122,214 +113,287 @@ export default function App() {
         
         setLoadingState('extracting');
         setError(null);
-        setProcessingStatus(hasImagesOrPDF ? "Đang tách trang PDF/Ảnh (OCR)..." : "Đang đọc & Chia nhỏ văn bản...");
+        setProcessingStatus(hasImagesOrPDF ? "Đang tách trang PDF/Ảnh (OCR)..." : "Đang đọc & phân tích dung lượng...");
         
         try {
             const extractionPromises = selectedFiles.map((file: File) => extractFromFile(file));
             const results = await Promise.all(extractionPromises);
             
-            const allChunks: { type: 'text' | 'image', data: string }[] = [];
-            let fullPreviewText = '';
+            let allLines: string[] = [];
+            const imageChunks: ProcessedChunk[] = [];
 
+            // 1. Tổng hợp dữ liệu
             for (const res of results) {
                 if (res.images.length > 0) {
-                    res.images.forEach(img => {
-                        allChunks.push({ type: 'image', data: img.data });
+                    res.images.forEach((img, idx) => {
+                        imageChunks.push({
+                            id: `img-${Date.now()}-${idx}`,
+                            index: 0, // Will update later
+                            type: 'image',
+                            data: img.data,
+                            previewStart: `[Trang Ảnh/PDF ${idx + 1}]`,
+                            previewEnd: `(Dữ liệu dạng ảnh, sẽ dùng OCR)`,
+                            isSelected: true,
+                            status: 'idle'
+                        });
                     });
-                    fullPreviewText += `[Đã tải ${res.images.length} trang hình ảnh/PDF - Sẽ dùng Gemini OCR]\n`;
                 } else if (res.text) {
-                    fullPreviewText += res.text + '\n\n';
                     const lines = res.text.split(/\r?\n/);
-                    let chunkSize = 500;
-                    if (chunkStrategy === 'ALL') {
-                        chunkSize = Math.max(1, lines.length);
-                    } else {
-                        const parsed = parseInt(chunkStrategy);
-                        chunkSize = isNaN(parsed) || parsed <= 0 ? 500 : parsed;
-                    }
-
-                    const HEADER_ROWS = 20; 
-                    const header = lines.slice(0, HEADER_ROWS).join('\n');
-                    
-                    if (lines.length <= chunkSize) {
-                        allChunks.push({ type: 'text', data: res.text });
-                    } else {
-                        const body = lines.slice(HEADER_ROWS);
-                        for (let i = 0; i < body.length; i += chunkSize) {
-                            const chunkBody = body.slice(i, i + chunkSize).join('\n');
-                            const chunkContent = `--- CONTEXT HEADER (REFERENCE ONLY - DO NOT EXTRACT) ---\n${header}\n--------------------------------------------------------\n\n--- DATA PART ${Math.floor(i/chunkSize) + 1} (EXTRACT THIS) ---\n${chunkBody}`;
-                            allChunks.push({ type: 'text', data: chunkContent });
-                        }
-                    }
+                    allLines = [...allLines, ...lines];
                 }
             }
 
-            setProcessedChunks(allChunks);
+            // 2. Logic đề xuất chiến lược (Recommendation)
+            const totalLines = allLines.length;
+            let suggestion: ChunkStrategy = '500';
             
-            const PREVIEW_LIMIT = 50000;
-            if (fullPreviewText.length > PREVIEW_LIMIT) {
-                setStatementContent(fullPreviewText.substring(0, PREVIEW_LIMIT) + "\n\n... (Nội dung quá dài, đã ẩn bớt để tránh lag giao diện. Dữ liệu gốc vẫn được gửi đầy đủ cho AI) ...");
-            } else {
-                setStatementContent(fullPreviewText.trim());
+            if (totalLines > 3000) suggestion = '200'; // File rất lớn -> chia nhỏ để tránh timeout
+            else if (totalLines > 1000) suggestion = '500'; // File trung bình
+            else if (totalLines > 0 && totalLines < 300) suggestion = 'ALL'; // File nhỏ
+            
+            setRecommendedStrategy(suggestion);
+            
+            // Nếu người dùng chưa chọn gì (lần đầu), set theo suggestion
+            // Nếu đã chọn rồi thì giữ nguyên lựa chọn của họ (nhưng UI vẫn hiện khuyên dùng)
+            setChunkStrategy(suggestion); 
+
+            // 3. Thực hiện chia nhỏ (Splitting)
+            let finalChunks: ProcessedChunk[] = [...imageChunks];
+            
+            if (allLines.length > 0) {
+                let chunkSize = 500;
+                const strategyToUse = chunkStrategy === '500' && suggestion !== '500' ? suggestion : chunkStrategy; // Use suggestion on first run logic helper, but here we depend on state.
+                // Re-evaluate chunkSize based on current state `chunkStrategy`
+                if (chunkStrategy === 'ALL') {
+                    chunkSize = Math.max(1, allLines.length);
+                } else {
+                    chunkSize = parseInt(chunkStrategy);
+                }
+
+                const HEADER_ROWS = 20; // Giữ lại header cho ngữ cảnh
+                const headerText = allLines.slice(0, HEADER_ROWS).join('\n');
+                const bodyLines = allLines.slice(HEADER_ROWS);
+
+                // Nếu body rỗng (file quá ngắn), lấy luôn header làm body
+                const sourceLines = bodyLines.length > 0 ? bodyLines : allLines;
+                const effectiveHeader = bodyLines.length > 0 ? headerText : "";
+
+                for (let i = 0; i < sourceLines.length; i += chunkSize) {
+                    const chunkBodyLines = sourceLines.slice(i, i + chunkSize);
+                    const chunkBody = chunkBodyLines.join('\n');
+                    
+                    const contextContent = effectiveHeader 
+                        ? `--- HEADER CONTEXT ---\n${effectiveHeader}\n--- END HEADER ---\n\n${chunkBody}` 
+                        : chunkBody;
+
+                    // Tạo preview text
+                    const previewStart = chunkBodyLines.slice(0, 3).map(l => l.trim()).filter(l => l).join('\n') || "(Trống)";
+                    const previewEnd = chunkBodyLines.slice(-3).map(l => l.trim()).filter(l => l).join('\n') || "(Trống)";
+
+                    finalChunks.push({
+                        id: `txt-${Date.now()}-${i}`,
+                        index: 0,
+                        type: 'text',
+                        data: contextContent,
+                        previewStart: previewStart,
+                        previewEnd: previewEnd,
+                        isSelected: true,
+                        status: 'idle'
+                    });
+                }
             }
 
-            setProcessingStatus(`Đã sẵn sàng xử lý ${allChunks.length} phần dữ liệu.`);
+            // Re-index
+            finalChunks = finalChunks.map((c, idx) => ({ ...c, index: idx + 1 }));
+            setChunks(finalChunks);
+            setProcessingStatus(`Đã trích xuất ${totalLines} dòng & chia thành ${finalChunks.length} phần.`);
 
         } catch (err) {
             console.error(err);
-            if (err instanceof Error) {
-                setError(`Lỗi trích xuất: ${err.message}`);
-            } else {
-                    setError(`Lỗi trích xuất: ${String(err)}`);
-            }
+            setError(err instanceof Error ? err.message : String(err));
         } finally {
             setLoadingState('idle');
         }
     };
 
+    // --- SELECTION HANDLERS ---
+    const toggleChunkSelection = (id: string) => {
+        setChunks(prev => prev.map(c => c.id === id ? { ...c, isSelected: !c.isSelected } : c));
+    };
+
+    const toggleAllChunks = (select: boolean) => {
+        setChunks(prev => prev.map(c => ({ ...c, isSelected: select })));
+    };
+
+    // --- PROCESSING HANDLERS ---
     const handleSubmit = async () => {
-        if (processedChunks.length === 0) {
-            setError('Không có dữ liệu. Vui lòng nhấn "Trích xuất dữ liệu" trước.');
+        const selectedChunks = chunks.filter(c => c.isSelected);
+        if (selectedChunks.length === 0) {
+            setError('Vui lòng chọn ít nhất một phần để xử lý.');
             return;
         }
 
         setLoadingState('processing');
         setError(null);
-        setResult(null);
-        setBalanceMismatchWarning(null);
-        setHistory([]); 
-        setActiveKeyInfo(''); // Reset key info
+        setMergedResult(null); // Reset merged result on new run
+        setIsMergedView(false);
+        setActiveKeyInfo('');
+        setGlobalProgress(0);
+
+        let completedCount = 0;
+        const total = selectedChunks.length;
+
+        // Reset status of selected chunks to idle before running
+        setChunks(prev => prev.map(c => c.isSelected ? { ...c, status: 'idle', result: undefined, error: undefined, processingMessage: undefined } : c));
+
+        // PROCESS LOOP
+        for (const chunk of selectedChunks) {
+            // 1. Update status -> processing
+            setChunks(prev => prev.map(c => c.id === chunk.id ? { ...c, status: 'processing' } : c));
+            setProcessingStatus(`Đang xử lý phần ${chunk.index}...`);
+
+            try {
+                // 2. Call AI
+                let result: GeminiResponse;
+                const statusCallback = (model: string, keyIdx: number) => {
+                     // Update Real-time Model Info for this chunk
+                     let displayModel = "Gemini";
+                     if (model.includes("pro")) displayModel = "Gemini Pro";
+                     else if (model.includes("flash")) displayModel = "Gemini Flash";
+                     
+                     const msg = `${displayModel} ${keyIdx}`;
+                     setActiveKeyInfo(msg); // Update global header
+                     
+                     // Update chunk specific message
+                     setChunks(prev => prev.map(c => c.id === chunk.id ? { ...c, processingMessage: msg } : c));
+                };
+
+                if (chunk.type === 'text') {
+                    result = await processStatement({ text: chunk.data }, true, statusCallback);
+                } else {
+                    const text = await extractTextFromContent({ images: [{ mimeType: 'image/jpeg', data: chunk.data }] });
+                    result = await processStatement({ text: text }, true, statusCallback);
+                }
+
+                // 3. Update status -> completed
+                setChunks(prev => prev.map(c => c.id === chunk.id ? { 
+                    ...c, 
+                    status: 'completed', 
+                    result: result 
+                } : c));
+
+            } catch (err: any) {
+                console.error(`Error processing chunk ${chunk.index}:`, err);
+                setChunks(prev => prev.map(c => c.id === chunk.id ? { 
+                    ...c, 
+                    status: 'error', 
+                    error: err.message || "Lỗi xử lý" 
+                } : c));
+            }
+
+            completedCount++;
+            setGlobalProgress(Math.round((completedCount / total) * 100));
+        }
+
+        setLoadingState('idle');
+        setProcessingStatus('Hoàn tất toàn bộ!');
+        setActiveKeyInfo('');
+    };
+
+    // --- MERGE LOGIC ---
+    const handleMergeResults = () => {
+        const completedChunks = chunks.filter(c => c.status === 'completed' && c.result);
+        if (completedChunks.length === 0) return;
+
+        let allTransactions: Transaction[] = [];
+        let firstAccountInfo = completedChunks[0].result?.accountInfo;
+        let globalOpening = completedChunks[0].result?.openingBalance || 0;
         
-        setProgress(0);
-        setProcessingStatus(`Đang khởi tạo Gemini...`);
-
-        try {
-            const data = await processBatchData(processedChunks, (current, total, modelName, keyIndex) => {
-                const percent = Math.round((current / total) * 100);
-                setProgress(percent);
-                
-                // Format Model Name để hiển thị đẹp hơn
-                let displayModel = "Gemini";
-                if (modelName) {
-                    if (modelName.includes("pro")) displayModel = "Gemini Pro";
-                    else if (modelName.includes("flash")) displayModel = "Gemini Flash";
-                    else displayModel = modelName;
-                }
-                
-                // Chuỗi hiển thị: "Gemini Pro 1", "Gemini Flash 2"...
-                const keyInfoStr = `${displayModel} ${keyIndex || 1}`;
-                setActiveKeyInfo(keyInfoStr);
-
-                setProcessingStatus(`Đang xử lý phần ${current}/${total} (${keyInfoStr})`);
-            });
-            
-            setOpeningBalance(data.openingBalance?.toString() ?? '0');
-            setResult(data);
-            setHistory([data]);
-
-            if (data.endingBalance !== undefined && data.endingBalance !== 0) {
-                const { totalDebit, totalCredit, totalFee, totalVat } = data.transactions.reduce((acc, tx) => {
-                    acc.totalDebit += tx.debit;
-                    acc.totalCredit += tx.credit;
-                    acc.totalFee += tx.fee || 0;
-                    acc.totalVat += tx.vat || 0;
-                    return acc;
-                }, { totalDebit: 0, totalCredit: 0, totalFee: 0, totalVat: 0 });
-
-                const openingBal = data.openingBalance || 0;
-                const calculatedEndingBalance = openingBal + totalDebit - totalCredit - totalFee - totalVat;
-                
-                if (Math.abs(calculatedEndingBalance - data.endingBalance) > 1) { 
-                    setBalanceMismatchWarning(`Số dư cuối kỳ tính toán (${formatCurrency(calculatedEndingBalance)}) không khớp với số dư trên sao kê (${formatCurrency(data.endingBalance)}).`);
-                }
-            }
-
-        } catch (err) {
-            if (err instanceof Error) {
-                setError(err.message);
-            } else {
-                setError('Đã xảy ra lỗi không xác định.');
-            }
-        } finally {
-            setLoadingState('idle');
-            setProcessingStatus('Hoàn tất!');
-            setActiveKeyInfo('');
+        // Use user input opening balance if available
+        if (openingBalance) {
+            globalOpening = parseFloat(openingBalance.replace(/\./g, '')) || 0;
         }
+
+        completedChunks.forEach(c => {
+            if (c.result?.transactions) {
+                // Filter invalid ones
+                const valid = c.result.transactions.filter(tx => 
+                    !tx.description.toLowerCase().includes("số dư đầu kỳ") &&
+                    !tx.description.toLowerCase().includes("cộng phát sinh")
+                );
+                allTransactions = [...allTransactions, ...valid];
+            }
+        });
+
+        // Sort by date
+        allTransactions.sort((a, b) => {
+            const parseDate = (dateStr: string) => {
+                if (!dateStr) return 0;
+                const parts = dateStr.split('/');
+                if (parts.length === 3) return new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0])).getTime();
+                return 0;
+            };
+            return parseDate(a.date) - parseDate(b.date);
+        });
+
+        // Calculate totals for ending balance
+        const { totalDebit, totalCredit, totalFee, totalVat } = allTransactions.reduce((acc, tx) => ({
+             totalDebit: acc.totalDebit + tx.debit,
+             totalCredit: acc.totalCredit + tx.credit,
+             totalFee: acc.totalFee + (tx.fee || 0),
+             totalVat: acc.totalVat + (tx.vat || 0),
+        }), { totalDebit: 0, totalCredit: 0, totalFee: 0, totalVat: 0 });
+
+        const calculatedEnding = globalOpening + totalDebit - totalCredit - totalFee - totalVat;
+
+        setMergedResult({
+            accountInfo: firstAccountInfo || { accountName: '', accountNumber: '', bankName: '', branch: '' },
+            transactions: allTransactions,
+            openingBalance: globalOpening,
+            endingBalance: calculatedEnding
+        });
+
+        setIsMergedView(true);
     };
-    
-    const handleTransactionUpdate = (index: number, field: 'debit' | 'credit' | 'fee' | 'vat', value: number) => {
-        if (!result) return;
-        setHistory(prev => [...prev, result]); 
-        const updatedTransactions = [...result.transactions];
-        const transactionToUpdate = { ...updatedTransactions[index] };
-        if (field === 'fee' || field === 'vat') {
-            (transactionToUpdate as any)[field] = value;
+
+    // --- TRANSACTION UPDATE HANDLERS (Delegated) ---
+    // Note: Updating transactions in 'merged' view only updates the temporary merged result.
+    // Ideally, we should trace back to the chunk, but for simplicity, we update the view data.
+    const handleTransactionUpdate = (index: number, field: any, value: any) => {
+        if (isMergedView && mergedResult) {
+            const updatedTx = [...mergedResult.transactions];
+            updatedTx[index] = { ...updatedTx[index], [field]: value };
+            setMergedResult({ ...mergedResult, transactions: updatedTx });
         } else {
-            transactionToUpdate[field] = value;
+            // Find which chunk this transaction belongs to is hard in separate view without ID
+            // For separate view, we render separate tables, so the ResultTable callback 
+            // will need to know which chunk it belongs to.
+            // We will handle this by passing a wrapper to ResultTable in the render loop.
         }
-        updatedTransactions[index] = transactionToUpdate;
-        setResult({ ...result, transactions: updatedTransactions });
     };
-
-    const handleTransactionStringUpdate = (index: number, field: 'transactionCode' | 'date' | 'description', value: string) => {
-        if (!result) return;
-        setHistory(prev => [...prev, result]); 
-        const updatedTransactions = [...result.transactions];
-        const transactionToUpdate = { ...updatedTransactions[index] };
-        transactionToUpdate[field] = value;
-        updatedTransactions[index] = transactionToUpdate;
-        setResult({ ...result, transactions: updatedTransactions });
-    };
-
-    const handleTransactionAdd = (transaction: Transaction) => {
-        if (!result) return;
-        setHistory(prev => [...prev, result]); 
-        const newTransaction = {
-            transactionCode: transaction.transactionCode || '',
-            date: transaction.date || new Date().toLocaleDateString('vi-VN'),
-            description: transaction.description || 'Giao dịch mới',
-            debit: transaction.debit || 0,
-            credit: transaction.credit || 0,
-            fee: transaction.fee || 0,
-            vat: transaction.vat || 0,
-        };
-        const updatedTransactions = [...result.transactions, newTransaction];
-        setResult({ ...result, transactions: updatedTransactions });
-    };
-
-    const handleUndoLastChange = () => {
-        if (history.length <= 1) return; 
-        const lastState = history[history.length - 1];
-        setResult(lastState);
-        setHistory(prev => prev.slice(0, -1));
-    };
-
-    const getLoadingMessage = () => {
-        return processingStatus;
-    }
     
-    useEffect(() => {
-        if (!result) {
-            setBalanceMismatchWarning(null);
-            return;
-        };
-        const { endingBalance: extractedEndingBalance, transactions } = result;
-        if (extractedEndingBalance !== undefined && extractedEndingBalance !== 0) {
-            const { totalDebit, totalCredit, totalFee, totalVat } = transactions.reduce((acc, tx) => {
-                acc.totalDebit += tx.debit;
-                acc.totalCredit += tx.credit;
-                acc.totalFee += tx.fee || 0;
-                acc.totalVat += tx.vat || 0;
-                return acc;
-            }, { totalDebit: 0, totalCredit: 0, totalFee: 0, totalVat: 0 });
-            const calculatedEndingBalance = (parseFloat(openingBalance) || 0) + totalDebit - totalCredit - totalFee - totalVat;
-            if (Math.abs(calculatedEndingBalance - extractedEndingBalance) > 1) {
-                setBalanceMismatchWarning(`Số dư cuối kỳ tính toán (${formatCurrency(calculatedEndingBalance)}) không khớp với số dư trên sao kê (${formatCurrency(extractedEndingBalance)}).`);
-            } else {
-                setBalanceMismatchWarning(null);
+    // Wrapper to update specific chunk result
+    const updateChunkResult = (chunkId: string, index: number, field: any, value: any) => {
+        setChunks(prev => prev.map(c => {
+            if (c.id === chunkId && c.result) {
+                const updatedTx = [...c.result.transactions];
+                updatedTx[index] = { ...updatedTx[index], [field]: value };
+                return { ...c, result: { ...c.result, transactions: updatedTx } };
             }
-        }
-    }, [result, openingBalance]);
+            return c;
+        }));
+    };
+     const updateChunkResultString = (chunkId: string, index: number, field: any, value: any) => {
+        setChunks(prev => prev.map(c => {
+            if (c.id === chunkId && c.result) {
+                const updatedTx = [...c.result.transactions];
+                updatedTx[index] = { ...updatedTx[index], [field]: value };
+                return { ...c, result: { ...c.result, transactions: updatedTx } };
+            }
+            return c;
+        }));
+    };
+
 
     return (
         <div className="min-h-screen text-gray-800 dark:text-gray-200 p-4 sm:p-6 lg:p-8">
@@ -339,7 +403,7 @@ export default function App() {
                         Chuyển Đổi Sổ Phụ Ngân Hàng (Gemini Pro)
                     </h1>
                     <p className="mt-2 text-gray-600 dark:text-gray-400 flex items-center justify-center gap-2">
-                        <span>Upload sao kê. Powered by Google Gemini Pro (Waterfall Fallback).</span>
+                        <span>Xử lý Big Data (Chia nhỏ & Gộp). Powered by Gemini.</span>
                         <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200 border border-purple-200 dark:border-purple-700">
                             Version {CURRENT_VERSION}
                         </span>
@@ -347,220 +411,248 @@ export default function App() {
                 </header>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    {/* LEFT COLUMN: CONTROLS */}
                     <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg">
-                        <h2 className="text-2xl font-bold mb-4 text-gray-800 dark:text-gray-200">THÔNG TIN ĐẦU VÀO</h2>
+                        <h2 className="text-2xl font-bold mb-4 text-gray-800 dark:text-gray-200">QUY TRÌNH XỬ LÝ</h2>
                         
-                        <div className={`transition-opacity duration-300 ease-in-out ${isLoading ? 'opacity-50 pointer-events-none' : ''}`}>
+                        <div className={`transition-opacity duration-300 ease-in-out ${isLoading && loadingState === 'processing' ? 'opacity-80 pointer-events-none' : ''}`}>
                             
-                            {/* BƯỚC 1: UPLOAD FILE */}
-                            <div className="mb-6">
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                                    1. Upload file Sao kê (Excel/Word/PDF/JSON/Ảnh)
+                            {/* BƯỚC 1: UPLOAD */}
+                            <div className="mb-6 border-b border-gray-200 pb-4 dark:border-gray-700">
+                                <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-2">
+                                    1. Upload file sao kê
                                 </label>
                                 
                                 {selectedFiles.length > 0 && (
                                     <div className="mb-3 space-y-2">
                                         {selectedFiles.map((file, idx) => (
-                                            <div key={`${file.name}-${idx}`} className="flex items-center justify-between bg-gray-50 dark:bg-gray-700 rounded-lg p-3 border border-gray-200 dark:border-gray-600">
-                                                <div className="flex items-center overflow-hidden">
-                                                    <div className="p-1.5 rounded-full bg-blue-100 text-blue-600 mr-3">
-                                                         <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                                                        </svg>
-                                                    </div>
-                                                    <div className="truncate">
-                                                        <p className="text-sm font-medium text-gray-900 dark:text-white truncate max-w-[200px]">{file.name}</p>
-                                                        <p className="text-xs text-gray-500 dark:text-gray-400">{(file.size / 1024).toFixed(1)} KB</p>
-                                                    </div>
-                                                </div>
-                                                <button onClick={() => handleRemoveFile(idx)} className="text-gray-400 hover:text-red-500 p-1" title="Xóa file">
-                                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                                                        <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-                                                    </svg>
-                                                </button>
+                                            <div key={`${file.name}-${idx}`} className="flex items-center justify-between bg-gray-50 dark:bg-gray-700 rounded-lg p-2 border border-gray-200 dark:border-gray-600">
+                                                <span className="truncate text-sm font-medium ml-2">{file.name} ({(file.size/1024).toFixed(0)}KB)</span>
+                                                <button onClick={() => handleRemoveFile(idx)} className="text-red-500 hover:text-red-700 p-1">Xóa</button>
                                             </div>
                                         ))}
                                     </div>
                                 )}
 
                                 <div className="space-y-2">
-                                    <label htmlFor="file-upload" className={`relative cursor-pointer bg-white dark:bg-gray-700 rounded-md font-medium text-indigo-600 dark:text-indigo-400 hover:text-indigo-500 focus-within:outline-none focus-within:ring-2 focus-within:ring-offset-2 focus-within:ring-indigo-500 border-2 border-dashed border-gray-300 dark:border-gray-600 flex flex-col items-center justify-center ${selectedFiles.length > 0 ? 'p-4' : 'p-6'} hover:border-indigo-500 dark:hover:border-indigo-400 transition-colors`}>
+                                    <label htmlFor="file-upload" className={`cursor-pointer bg-white dark:bg-gray-700 rounded-md font-medium text-indigo-600 dark:text-indigo-400 border-2 border-dashed border-gray-300 dark:border-gray-600 flex flex-col items-center justify-center p-4 hover:border-indigo-500`}>
                                         <div className="flex items-center space-x-2">
                                             <UploadIcon/>
-                                            <span className="text-sm">{selectedFiles.length > 0 ? 'Thêm file khác' : 'Chọn tệp (Excel, Word, PDF, JSON, Ảnh)'}</span>
+                                            <span className="text-sm">{selectedFiles.length > 0 ? 'Thêm file khác' : 'Chọn tệp (PDF, Excel, Ảnh...)'}</span>
                                         </div>
-                                        <input id="file-upload" name="file-upload" type="file" className="sr-only" onChange={handleFileChange} accept=".pdf,.docx,.xlsx,.xls,.txt,.csv,.json,.png,.jpg,.jpeg,.bmp" multiple/>
+                                        <input id="file-upload" type="file" className="sr-only" onChange={handleFileChange} accept=".pdf,.docx,.xlsx,.xls,.txt,.csv,.json,.png,.jpg,.jpeg" multiple/>
                                     </label>
                                     
                                     {uploadState === 'uploading' && (
-                                         <div className="w-full bg-gray-200 rounded-full h-1.5 dark:bg-gray-600 overflow-hidden mt-2">
-                                            <div className="h-1.5 rounded-full bg-blue-500 transition-all duration-300" style={{ width: `${uploadProgress}%` }}></div>
-                                        </div>
-                                    )}
-                                    
-                                    {selectedFiles.length > 0 && (
-                                        <div className="flex justify-end">
-                                            <button onClick={handleResetUpload} className="text-xs text-red-500 hover:underline">
-                                                Xóa tất cả ({selectedFiles.length})
-                                            </button>
-                                        </div>
+                                         <div className="w-full bg-gray-200 rounded-full h-1.5 mt-2"><div className="h-1.5 rounded-full bg-blue-500" style={{ width: `${uploadProgress}%` }}></div></div>
                                     )}
                                 </div>
                             </div>
 
-                            {/* BƯỚC 2: CẤU HÌNH & TRÍCH XUẤT */}
-                            <div className="mb-6">
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                            {/* BƯỚC 2: CẤU HÌNH & CHIA NHỎ */}
+                            <div className="mb-6 border-b border-gray-200 pb-4 dark:border-gray-700">
+                                <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-2">
                                     2. Cấu hình & Trích xuất
                                 </label>
                                 
-                                <div className="flex gap-2 mb-3">
+                                <div className="flex flex-col gap-2 mb-3">
+                                    <span className="text-xs text-gray-500">AI sẽ tự động đề xuất cách chia nhỏ dựa trên dung lượng file.</span>
                                     <select 
                                         value={chunkStrategy}
                                         onChange={(e) => setChunkStrategy(e.target.value as ChunkStrategy)}
-                                        className="block w-full px-3 py-2 text-sm bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                                        className="block w-full px-3 py-2 text-sm bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md focus:ring-indigo-500"
                                         disabled={loadingState === 'extracting'}
                                     >
-                                        <option value="500">Tự động: 500 dòng/phần (Khuyên dùng)</option>
-                                        <option value="ALL">Gửi toàn bộ (1 phần duy nhất)</option>
-                                        <option value="200">Chia nhỏ: 200 dòng/phần</option>
+                                        <option value="500">500 dòng/phần {recommendedStrategy === '500' ? '(Khuyên dùng)' : ''}</option>
+                                        <option value="200">200 dòng/phần {recommendedStrategy === '200' ? '(Khuyên dùng - File lớn)' : ''}</option>
+                                        <option value="1000">1000 dòng/phần</option>
+                                        <option value="ALL">Gửi toàn bộ {recommendedStrategy === 'ALL' ? '(Khuyên dùng - File nhỏ)' : ''}</option>
                                     </select>
                                 </div>
 
                                 <button
                                     onClick={handleExtractText}
                                     disabled={selectedFiles.length === 0 || loadingState === 'extracting'}
-                                    className={`w-full flex items-center justify-center px-4 py-3 border border-transparent text-sm font-medium rounded-md transition-all
-                                        ${selectedFiles.length > 0 && uploadState !== 'uploading'
-                                            ? 'text-white bg-indigo-600 hover:bg-indigo-700 shadow-md transform hover:-translate-y-0.5' 
-                                            : 'bg-gray-100 text-gray-400 cursor-not-allowed dark:bg-gray-700 dark:text-gray-500'}
+                                    className={`w-full flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md transition-all
+                                        ${selectedFiles.length > 0 && uploadState !== 'uploading' ? 'text-white bg-indigo-600 hover:bg-indigo-700' : 'bg-gray-100 text-gray-400 cursor-not-allowed'}
                                     `}
                                 >
-                                    {loadingState === 'extracting' ? <ProcessIcon /> : null}
-                                    {loadingState === 'extracting' 
-                                        ? 'Đang chuẩn bị...' 
-                                        : `Trích xuất & Chia nhỏ`
-                                    }
+                                    {loadingState === 'extracting' ? <><ProcessIcon /> Đang phân tích...</> : `Trích xuất & Chia nhỏ`}
                                 </button>
-                                {processedChunks.length > 0 && (
-                                    <div className="mt-2 p-2 bg-indigo-50 text-indigo-700 rounded text-xs text-center border border-indigo-200">
-                                        Đã chia thành <b>{processedChunks.length}</b> phần theo cấu hình bạn chọn.
+                            </div>
+
+                             {/* BƯỚC 3: CHỌN PHẦN XỬ LÝ (PREVIEW CARDS) */}
+                            {chunks.length > 0 && (
+                                <div className="mb-6 border-b border-gray-200 pb-4 dark:border-gray-700">
+                                    <div className="flex justify-between items-center mb-2">
+                                        <label className="block text-sm font-bold text-gray-700 dark:text-gray-300">
+                                            3. Chọn phần dữ liệu ({chunks.filter(c => c.isSelected).length}/{chunks.length})
+                                        </label>
+                                        <div className="space-x-2">
+                                            <button onClick={() => toggleAllChunks(true)} className="text-xs text-blue-600 hover:underline">Chọn tất cả</button>
+                                            <button onClick={() => toggleAllChunks(false)} className="text-xs text-gray-500 hover:underline">Bỏ chọn</button>
+                                        </div>
                                     </div>
-                                )}
-                            </div>
-                            
-                            {/* BƯỚC 3: NỘI DUNG */}
-                            <div className="mb-4">
-                                <label htmlFor="statementContent" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                                    3. Xem trước (Preview)
-                                </label>
-                                <textarea
-                                    id="statementContent"
-                                    rows={6}
-                                    value={statementContent}
-                                    onChange={(e) => setStatementContent(e.target.value)}
-                                    placeholder="Nội dung văn bản trích xuất sẽ hiện ở đây..."
-                                    className="w-full px-3 py-2 text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
-                                    disabled
-                                />
-                            </div>
+                                    
+                                    <div className="max-h-60 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+                                        {chunks.map((chunk) => (
+                                            <div key={chunk.id} className={`p-3 rounded-lg border text-sm transition-colors ${chunk.isSelected ? 'border-blue-400 bg-blue-50 dark:bg-blue-900/20' : 'border-gray-200 bg-gray-50 dark:bg-gray-700 opacity-70'}`}>
+                                                <div className="flex items-start gap-3">
+                                                    <input 
+                                                        type="checkbox" 
+                                                        checked={chunk.isSelected} 
+                                                        onChange={() => toggleChunkSelection(chunk.id)}
+                                                        className="mt-1 h-4 w-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+                                                    />
+                                                    <div className="flex-1 min-w-0">
+                                                        <div className="flex justify-between">
+                                                            <span className="font-semibold text-gray-800 dark:text-gray-200">Phần {chunk.index} ({chunk.type})</span>
+                                                            <span className={`text-xs px-2 py-0.5 rounded-full ${
+                                                                chunk.status === 'completed' ? 'bg-green-100 text-green-800' :
+                                                                chunk.status === 'processing' ? 'bg-yellow-100 text-yellow-800' :
+                                                                chunk.status === 'error' ? 'bg-red-100 text-red-800' : 'bg-gray-200 text-gray-600'
+                                                            }`}>
+                                                                {chunk.status === 'processing' ? 'Đang chạy...' : chunk.status}
+                                                            </span>
+                                                        </div>
+                                                        <div className="mt-1 text-xs text-gray-500 font-mono bg-white dark:bg-gray-800 p-1.5 rounded border border-gray-100 dark:border-gray-600">
+                                                            <div className="text-blue-600">{chunk.previewStart}</div>
+                                                            <div className="text-center my-0.5 text-gray-300">...</div>
+                                                            <div className="text-purple-600">{chunk.previewEnd}</div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
 
                              {/* BƯỚC 4: SỐ DƯ */}
                              <div className="mb-4">
-                                <label htmlFor="openingBalance" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                                <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-1">
                                     4. Số dư đầu kỳ (Tùy chọn)
                                 </label>
                                 <input
                                     type="text"
-                                    id="openingBalance"
                                     value={openingBalance ? new Intl.NumberFormat('vi-VN').format(parseFloat(openingBalance.replace(/\./g, ''))) : ''}
                                     onChange={(e) => {
                                         const value = e.target.value.replace(/\./g, '');
-                                        if (!isNaN(parseFloat(value)) || value === '') {
-                                            setOpeningBalance(value);
-                                        }
+                                        if (!isNaN(parseFloat(value)) || value === '') setOpeningBalance(value);
                                     }}
-                                    placeholder="Nhập số dư đầu kỳ nếu có..."
-                                    className="w-full px-3 py-2 text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                                    placeholder="Nhập số dư đầu kỳ..."
+                                    className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 focus:ring-indigo-500"
                                 />
+                            </div>
+
+                             {/* BƯỚC 5: XỬ LÝ */}
+                             <div className="mt-6">
+                                {isLoading && (
+                                    <div className="mb-2">
+                                        <div className="flex justify-between text-xs text-gray-500 mb-1">
+                                            <span>Tiến trình: {processingStatus}</span>
+                                            <span>{globalProgress}%</span>
+                                        </div>
+                                        <div className="w-full bg-gray-200 rounded-full h-2"><div className="bg-green-500 h-2 rounded-full transition-all" style={{ width: `${globalProgress}%` }}></div></div>
+                                    </div>
+                                )}
+
+                                <button
+                                    onClick={handleSubmit}
+                                    disabled={isLoading || chunks.length === 0}
+                                    className="w-full flex items-center justify-center px-6 py-3 border border-transparent text-base font-bold rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 disabled:bg-green-400 disabled:cursor-not-allowed transition-colors"
+                                >
+                                    {loadingState === 'processing' 
+                                    ? <><ProcessIcon /> Đang xử lý ({activeKeyInfo || 'Gemini'})...</> 
+                                    : '5. Bắt đầu Xử lý'}
+                                </button>
+                             </div>
+                             
+                             {error && (
+                                <div className="mt-4 p-3 bg-red-100 text-red-700 text-sm rounded border border-red-300">
+                                    {error}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* RIGHT COLUMN: RESULTS */}
+                    <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg min-h-[500px] flex flex-col">
+                        <div className="flex justify-between items-center mb-4">
+                            <h2 className="text-2xl font-bold text-gray-800 dark:text-gray-200">KẾT QUẢ</h2>
+                            <div className="space-x-2">
+                                <button 
+                                    onClick={() => setIsMergedView(false)}
+                                    className={`px-3 py-1 text-sm rounded-md transition-colors ${!isMergedView ? 'bg-indigo-100 text-indigo-700 font-bold' : 'text-gray-500 hover:bg-gray-100'}`}
+                                >
+                                    Từng phần
+                                </button>
+                                <button 
+                                    onClick={handleMergeResults}
+                                    className={`px-3 py-1 text-sm rounded-md transition-colors ${isMergedView ? 'bg-indigo-100 text-indigo-700 font-bold' : 'text-gray-500 hover:bg-gray-100'}`}
+                                    disabled={chunks.filter(c => c.status === 'completed').length < 2}
+                                >
+                                    Gộp tất cả
+                                </button>
                             </div>
                         </div>
 
-                        {/* Loading cho BƯỚC 5 */}
-                        {isLoading && loadingState === 'processing' && (
-                            <div className="mt-4">
-                                <div className="flex justify-between text-xs text-gray-500 mb-1">
-                                    <span>Tiến trình xử lý Gemini</span>
-                                    <span>{Math.round(progress)}%</span>
+                        <div className="flex-1 overflow-y-auto custom-scrollbar">
+                            {/* VIEW: MERGED */}
+                            {isMergedView && mergedResult && (
+                                <div>
+                                    <div className="mb-4 p-2 bg-indigo-50 border border-indigo-200 text-indigo-800 rounded text-center text-sm">
+                                        Đang xem bảng gộp từ {chunks.filter(c=>c.status==='completed').length} phần.
+                                    </div>
+                                    <ResultTable 
+                                        accountInfo={mergedResult.accountInfo} 
+                                        transactions={mergedResult.transactions} 
+                                        openingBalance={mergedResult.openingBalance}
+                                        onUpdateTransaction={(idx, field, val) => handleTransactionUpdate(idx, field, val)}
+                                        onUpdateTransactionString={(idx, field, val) => handleTransactionUpdate(idx, field, val)}
+                                        balanceMismatchWarning={null}
+                                    />
+                                    <ChatAssistant 
+                                        reportData={mergedResult}
+                                        rawStatementContent={"[Merged Data]"}
+                                        onUpdateTransaction={(idx, f, v) => handleTransactionUpdate(idx, f, v)}
+                                        onTransactionAdd={() => {}}
+                                        onUndoLastChange={() => {}}
+                                    />
                                 </div>
-                                <div className="w-full bg-gray-200 rounded-full h-3 dark:bg-gray-700 overflow-hidden">
-                                    <div className="bg-gradient-to-r from-purple-500 to-indigo-500 h-3 rounded-full transition-all duration-500 ease-out" style={{ width: `${progress}%` }}></div>
+                            )}
+
+                            {/* VIEW: SEPARATE LIST */}
+                            {!isMergedView && (
+                                <div className="space-y-8">
+                                    {chunks.filter(c => c.status === 'completed' && c.result).map((chunk) => (
+                                        <div key={chunk.id} className="border border-gray-200 dark:border-gray-700 rounded-lg p-4 bg-gray-50 dark:bg-gray-900/30">
+                                            <div className="flex items-center gap-2 mb-2">
+                                                <span className="font-bold text-lg text-indigo-600">Phần {chunk.index}</span>
+                                                <span className="text-xs text-gray-400">({chunk.processingMessage})</span>
+                                            </div>
+                                            {chunk.result && (
+                                                <ResultTable 
+                                                    accountInfo={chunk.result.accountInfo} 
+                                                    transactions={chunk.result.transactions} 
+                                                    openingBalance={chunk.index === 1 ? (parseFloat(openingBalance) || chunk.result.openingBalance) : 0} // Chỉ phần 1 mới hiện Opening Balance user nhập
+                                                    onUpdateTransaction={(idx, f, v) => updateChunkResult(chunk.id, idx, f, v)}
+                                                    onUpdateTransactionString={(idx, f, v) => updateChunkResultString(chunk.id, idx, f, v)}
+                                                    balanceMismatchWarning={null}
+                                                />
+                                            )}
+                                        </div>
+                                    ))}
+                                    {chunks.filter(c => c.status === 'completed').length === 0 && (
+                                        <div className="text-center text-gray-400 mt-20">
+                                            Chưa có kết quả. Vui lòng chọn phần dữ liệu và bấm "Bắt đầu Xử lý".
+                                        </div>
+                                    )}
                                 </div>
-                                <p className="text-center text-sm font-medium text-indigo-600 dark:text-indigo-400 mt-2 animate-pulse">{getLoadingMessage()}</p>
-                            </div>
-                        )}
-
-                         {/* BƯỚC 5: XỬ LÝ */}
-                         <div className="mt-6">
-                             <button
-                                 onClick={handleSubmit}
-                                 disabled={isLoading || processedChunks.length === 0}
-                                 className="w-full flex items-center justify-center px-6 py-3 border border-transparent text-base font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:bg-green-400 disabled:cursor-not-allowed transition-colors"
-                             >
-                                 {loadingState === 'processing' 
-                                    ? <><ProcessIcon /> Đang xử lý ({activeKeyInfo || 'Gemini Pro'})...</> 
-                                    : '5. Bắt đầu Xử lý (Gemini Pro)'}
-                             </button>
-                         </div>
-                    </div>
-
-                    <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg">
-                        <h2 className="text-2xl font-bold mb-4 flex items-baseline">
-                            Quy trình (Gemini Waterfall)
-                        </h2>
-                        <ul className="space-y-4 text-gray-600 dark:text-gray-400">
-                            <li className="flex items-start">
-                                <span className="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-indigo-500 text-white font-bold text-sm mr-3">1</span>
-                                <span><b>Chia nhỏ & OCR:</b> Sử dụng Gemini Flash để đọc ảnh/PDF cực nhanh.</span>
-                            </li>
-                            <li className="flex items-start">
-                                <span className="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-purple-500 text-white font-bold text-sm mr-3">2</span>
-                                <span><b>Gemini 3 Pro:</b> Ưu tiên chạy Pro trên tất cả Key. Nếu tất cả đều hết Quota, tự động chuyển sang Flash.</span>
-                            </li>
-                             <li className="flex items-start">
-                                <span className="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-indigo-500 text-white font-bold text-sm mr-3">3</span>
-                                <span><b>Hoàn tất:</b> Tự động tổng hợp và kiểm tra cân đối.</span>
-                            </li>
-                        </ul>
+                            )}
+                        </div>
                     </div>
                 </div>
-
-                {error && (
-                    <div className="mt-8 p-4 bg-red-100 dark:bg-red-900 border border-red-400 dark:border-red-700 text-red-700 dark:text-red-200 rounded-lg">
-                        <p className="font-bold">Đã xảy ra lỗi!</p>
-                        <p>{error}</p>
-                    </div>
-                )}
-                
-                {result && (
-                  <>
-                    <ResultTable 
-                        accountInfo={result.accountInfo} 
-                        transactions={result.transactions} 
-                        openingBalance={parseFloat(openingBalance) || 0}
-                        onUpdateTransaction={handleTransactionUpdate}
-                        onUpdateTransactionString={handleTransactionStringUpdate}
-                        balanceMismatchWarning={balanceMismatchWarning}
-                    />
-                    <ChatAssistant 
-                        reportData={result}
-                        rawStatementContent={statementContent}
-                        onUpdateTransaction={handleTransactionUpdate}
-                        onUndoLastChange={handleUndoLastChange}
-                        onTransactionAdd={handleTransactionAdd}
-                    />
-                  </>
-                )}
             </div>
         </div>
     );
