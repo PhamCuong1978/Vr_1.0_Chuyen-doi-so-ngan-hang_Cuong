@@ -304,16 +304,15 @@ export const processStatement = async (
     - **Sổ Ngân Hàng** luôn ngược với **Sổ Kế Toán Doanh Nghiệp (TK 112)**.
     - **Ghi Nợ (Debit)** trên sao kê = **TIỀN RA** (Doanh nghiệp giảm) -> Gán vào JSON **'credit'**.
     - **Ghi Có (Credit)** trên sao kê = **TIỀN VÀO** (Doanh nghiệp tăng) -> Gán vào JSON **'debit'**.
-    - Số âm (-): Tiền ra -> JSON 'credit'.
-    - Số dương (+): Tiền vào -> JSON 'debit'.
 
-    ### 3. XỬ LÝ PHÍ (QUAN TRỌNG - TRÁNH DUPLICATE):
-    - Nếu dòng giao dịch là **PHÍ** (Ví dụ: Nội dung chứa "Thu phí dịch vụ", "Phí SMS", "Phí quản lý", v.v.):
-       - Số tiền phải được điền vào **'credit'** (Tiền ra).
-       - Trường **'fee' phải bằng 0** (Trừ khi trên sao kê CÓ CỘT PHÍ RIÊNG BIỆT tách khỏi cột số tiền giao dịch).
-       - **KHÔNG ĐƯỢC** điền số tiền vừa vào 'credit' vừa vào 'fee'.
-       - Ví dụ đúng: { "description": "THU PHI SMS", "credit": 22000, "fee": 0 }
-       - Ví dụ SAI: { "description": "THU PHI SMS", "credit": 22000, "fee": 22000 } (Vì điều này sẽ làm tổng tiền ra bị tính thành 44000).
+    ### 3. QUY TẮC "ĐƠN NHẤT" CHO DỮ LIỆU SỐ (TUYỆT ĐỐI TUÂN THỦ):
+    - **MỘT SỐ TIỀN CHỈ XUẤT HIỆN 1 LẦN DUY NHẤT**: Không bao giờ được copy/nhân bản số tiền từ cột này sang cột khác.
+    - **KHÔNG SUY LUẬN TỪ NỘI DUNG**: 
+      + Dù nội dung (Description) có chữ "Phí", "Fee", "VAT", "Thuế"... **NHƯNG** nếu bảng gốc không có cột riêng cho Phí/VAT, thì **TUYỆT ĐỐI KHÔNG** được tách số tiền đó ra, và cũng **KHÔNG ĐƯỢC** điền vào trường 'fee' hay 'vat'.
+      + Trong trường hợp đó, toàn bộ số tiền giữ nguyên ở cột 'credit' (hoặc 'debit').
+    - **KHI NÀO MỚI DÙNG TRƯỜNG 'fee' / 'vat'?**:
+      + Chỉ khi và chỉ khi trên bảng dữ liệu gốc có **CỘT VẬT LÝ RIÊNG BIỆT** tên là "Phí" hoặc "VAT".
+      + Nếu không có cột riêng, mặc định 'fee' = 0, 'vat' = 0.
 
     ### 4. CẤU TRÚC JSON OUTPUT:
     {
@@ -326,9 +325,9 @@ export const processStatement = async (
                 "date": "DD/MM/YYYY", 
                 "description": "string (Đã sanitize)", 
                 "debit": number (Tiền vào/Tăng), 
-                "credit": number (Tiền ra/Giảm - Bao gồm cả phí nếu đó là dòng phí), 
-                "fee": number (Chỉ điền nếu là cột riêng biệt, còn không thì để 0), 
-                "vat": number 
+                "credit": number (Tiền ra/Giảm - Đây là số tiền gốc giao dịch), 
+                "fee": number (Luôn là 0 trừ khi có cột riêng), 
+                "vat": number (Luôn là 0 trừ khi có cột riêng) 
             }
         ]
     }`;
