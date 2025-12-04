@@ -2,6 +2,7 @@ import { GoogleGenAI } from "@google/genai";
 import type { GeminiResponse, AIChatResponse, ChatMessage, Transaction } from '../types';
 
 // --- CONFIGURATION ---
+// Thứ tự ưu tiên Model: Luôn thử Pro trước, nếu thất bại toàn bộ các key mới sang Flash
 const PRO_MODEL = 'gemini-3-pro-preview';
 const FLASH_MODEL = 'gemini-2.5-flash';
 
@@ -197,52 +198,55 @@ const callAIUnified = async (
 
     let lastError: any = null;
 
-    // CHIẾN LƯỢC MỚI: Priority Models -> Priority Keys
-    // Quy trình:
-    // 1. Thử Model PRO với Key 1, Key 2, Key 3...
-    // 2. Nếu tất cả Key đều fail với PRO (do hết Quota), chuyển sang FLASH.
-    // 3. Thử Model FLASH với Key 1, Key 2, Key 3...
+    // CHIẾN LƯỢC QUAN TRỌNG: Priority Models -> Priority Keys
+    // 1. [VÒNG 1] Thử Model PRO với Key 1 -> Key N. Nếu Key nào chạy được thì trả về kết quả ngay.
+    // 2. [VÒNG 2] Nếu tất cả các Key với Model PRO đều lỗi (Quota/Server Error), chuyển sang FLASH.
+    // 3. [VÒNG 3] Thử Model FLASH với Key 1 -> Key N.
     
     const modelsToTry = [PRO_MODEL, FLASH_MODEL];
 
     for (const model of modelsToTry) {
-        let modelFailedAllKeys = true;
-
+        // Vòng lặp qua từng Key cho Model hiện tại
         for (let i = 0; i < keys.length; i++) {
             const currentKey = keys[i];
             
-            // Báo cáo trạng thái hiện tại ra UI
+            // Cập nhật UI: Đang chạy Model nào, Key số mấy
             if (onStatusUpdate) {
                 onStatusUpdate(model, i + 1);
             }
 
             try {
-                // console.log(`Attempting Model [${model}] with Key index [${i}]`);
+                // Thử gọi API
                 return await callGoogleAI(currentKey, model, { messages, jsonMode });
             } catch (err: any) {
                 const errorMessage = String(err).toLowerCase();
-                const isQuotaError = errorMessage.includes('429') || 
+                
+                // Mở rộng các loại lỗi có thể "Retry" (Thử lại với Key khác)
+                // Bao gồm: 429 (Quota), 503 (Overloaded), 500 (Internal), Resource Exhausted
+                const isRetryableError = errorMessage.includes('429') || 
                                      errorMessage.includes('resource exhausted') || 
                                      errorMessage.includes('too many requests') ||
                                      errorMessage.includes('503') ||
-                                     errorMessage.includes('overloaded');
+                                     errorMessage.includes('500') || 
+                                     errorMessage.includes('internal') ||
+                                     errorMessage.includes('overloaded') ||
+                                     errorMessage.includes('quota');
                 
                 lastError = err;
 
-                if (isQuotaError) {
-                    console.warn(`⚠️ Model [${model}] Key [${i + 1}] bị hết Quota/Overloaded. Thử Key tiếp theo...`);
-                    // Tiếp tục vòng lặp keys
+                if (isRetryableError) {
+                    console.warn(`⚠️ Model [${model}] Key [${i + 1}] gặp lỗi Retryable (Quota/Server). Đang thử Key tiếp theo...`);
+                    // Continue vòng lặp inner để thử Key tiếp theo (i++)
                     continue; 
                 } else {
-                    // Nếu lỗi khác (ví dụ 400 Bad Request, Parse Error), throw ngay lập tức vì đổi key cũng không sửa được
-                    console.error(`Lỗi không phải Quota (${model}):`, err);
+                    // Nếu lỗi nghiêm trọng (ví dụ 400 Bad Request do sai format input), throw ngay lập tức
+                    console.error(`Lỗi Critical (${model}):`, err);
                     throw err; 
                 }
             }
-            // Nếu thành công, return sẽ thoát khỏi hàm, không chạy xuống đây.
         }
         
-        console.warn(`⚠️ Đã thử tất cả Key với Model [${model}] nhưng thất bại (Quota). Đang chuyển sang Model tiếp theo (nếu có)...`);
+        console.warn(`⚠️ Đã thử TẤT CẢ Key với Model [${model}] nhưng đều thất bại. Đang chuyển sang Model dự phòng (nếu còn)...`);
     }
 
     throw new Error(`Tất cả các Key & Model đều thất bại. Vui lòng thử lại sau giây lát. Lỗi cuối cùng: ${lastError?.message}`);
