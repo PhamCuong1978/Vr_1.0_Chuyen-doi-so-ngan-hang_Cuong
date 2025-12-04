@@ -38,7 +38,7 @@ export default function App() {
     const isLoading = loadingState !== 'idle';
     
     useEffect(() => {
-        console.log(`App Version ${CURRENT_VERSION} Loaded - Big Data Edition`);
+        console.log(`App Version ${CURRENT_VERSION} Loaded - Advanced Merge Edition`);
         return () => {
             if (uploadInterval.current) clearInterval(uploadInterval.current);
         };
@@ -128,13 +128,15 @@ export default function App() {
                     res.images.forEach((img, idx) => {
                         imageChunks.push({
                             id: `img-${Date.now()}-${idx}`,
-                            index: 0, // Will update later
+                            index: 0, 
                             type: 'image',
                             data: img.data,
                             previewStart: `[Trang Ảnh/PDF ${idx + 1}]`,
                             previewEnd: `(Dữ liệu dạng ảnh, sẽ dùng OCR)`,
                             isSelected: true,
-                            status: 'idle'
+                            status: 'idle',
+                            isResultExpanded: true,
+                            isCheckedForMerge: true
                         });
                     });
                 } else if (res.text) {
@@ -143,18 +145,15 @@ export default function App() {
                 }
             }
 
-            // 2. Logic đề xuất chiến lược (Recommendation)
+            // 2. Logic đề xuất chiến lược
             const totalLines = allLines.length;
             let suggestion: ChunkStrategy = '500';
             
-            if (totalLines > 3000) suggestion = '200'; // File rất lớn -> chia nhỏ để tránh timeout
-            else if (totalLines > 1000) suggestion = '500'; // File trung bình
-            else if (totalLines > 0 && totalLines < 300) suggestion = 'ALL'; // File nhỏ
+            if (totalLines > 3000) suggestion = '200';
+            else if (totalLines > 1000) suggestion = '500';
+            else if (totalLines > 0 && totalLines < 300) suggestion = 'ALL'; 
             
             setRecommendedStrategy(suggestion);
-            
-            // Nếu người dùng chưa chọn gì (lần đầu), set theo suggestion
-            // Nếu đã chọn rồi thì giữ nguyên lựa chọn của họ (nhưng UI vẫn hiện khuyên dùng)
             setChunkStrategy(suggestion); 
 
             // 3. Thực hiện chia nhỏ (Splitting)
@@ -162,19 +161,16 @@ export default function App() {
             
             if (allLines.length > 0) {
                 let chunkSize = 500;
-                const strategyToUse = chunkStrategy === '500' && suggestion !== '500' ? suggestion : chunkStrategy; // Use suggestion on first run logic helper, but here we depend on state.
-                // Re-evaluate chunkSize based on current state `chunkStrategy`
                 if (chunkStrategy === 'ALL') {
                     chunkSize = Math.max(1, allLines.length);
                 } else {
                     chunkSize = parseInt(chunkStrategy);
                 }
 
-                const HEADER_ROWS = 20; // Giữ lại header cho ngữ cảnh
+                const HEADER_ROWS = 20; 
                 const headerText = allLines.slice(0, HEADER_ROWS).join('\n');
                 const bodyLines = allLines.slice(HEADER_ROWS);
 
-                // Nếu body rỗng (file quá ngắn), lấy luôn header làm body
                 const sourceLines = bodyLines.length > 0 ? bodyLines : allLines;
                 const effectiveHeader = bodyLines.length > 0 ? headerText : "";
 
@@ -186,7 +182,6 @@ export default function App() {
                         ? `--- HEADER CONTEXT ---\n${effectiveHeader}\n--- END HEADER ---\n\n${chunkBody}` 
                         : chunkBody;
 
-                    // Tạo preview text
                     const previewStart = chunkBodyLines.slice(0, 3).map(l => l.trim()).filter(l => l).join('\n') || "(Trống)";
                     const previewEnd = chunkBodyLines.slice(-3).map(l => l.trim()).filter(l => l).join('\n') || "(Trống)";
 
@@ -198,7 +193,9 @@ export default function App() {
                         previewStart: previewStart,
                         previewEnd: previewEnd,
                         isSelected: true,
-                        status: 'idle'
+                        status: 'idle',
+                        isResultExpanded: true,
+                        isCheckedForMerge: true
                     });
                 }
             }
@@ -224,6 +221,24 @@ export default function App() {
     const toggleAllChunks = (select: boolean) => {
         setChunks(prev => prev.map(c => ({ ...c, isSelected: select })));
     };
+    
+    // --- RESULT VIEW HANDLERS ---
+    const toggleResultExpand = (id: string) => {
+        setChunks(prev => prev.map(c => c.id === id ? { ...c, isResultExpanded: !c.isResultExpanded } : c));
+    };
+
+    const toggleAllResultsExpand = (expand: boolean) => {
+        setChunks(prev => prev.map(c => ({ ...c, isResultExpanded: expand })));
+    };
+
+    const toggleMergeCheckbox = (id: string) => {
+        setChunks(prev => prev.map(c => c.id === id ? { ...c, isCheckedForMerge: !c.isCheckedForMerge } : c));
+    };
+
+    const toggleAllMergeCheckbox = (checked: boolean) => {
+        setChunks(prev => prev.map(c => ({ ...c, isCheckedForMerge: checked })));
+    };
+
 
     // --- PROCESSING HANDLERS ---
     const handleSubmit = async () => {
@@ -235,7 +250,7 @@ export default function App() {
 
         setLoadingState('processing');
         setError(null);
-        setMergedResult(null); // Reset merged result on new run
+        setMergedResult(null); 
         setIsMergedView(false);
         setActiveKeyInfo('');
         setGlobalProgress(0);
@@ -243,28 +258,22 @@ export default function App() {
         let completedCount = 0;
         const total = selectedChunks.length;
 
-        // Reset status of selected chunks to idle before running
-        setChunks(prev => prev.map(c => c.isSelected ? { ...c, status: 'idle', result: undefined, error: undefined, processingMessage: undefined } : c));
+        // Reset status
+        setChunks(prev => prev.map(c => c.isSelected ? { ...c, status: 'idle', result: undefined, error: undefined, processingMessage: undefined, isResultExpanded: true, isCheckedForMerge: true } : c));
 
-        // PROCESS LOOP
         for (const chunk of selectedChunks) {
-            // 1. Update status -> processing
             setChunks(prev => prev.map(c => c.id === chunk.id ? { ...c, status: 'processing' } : c));
             setProcessingStatus(`Đang xử lý phần ${chunk.index}...`);
 
             try {
-                // 2. Call AI
                 let result: GeminiResponse;
                 const statusCallback = (model: string, keyIdx: number) => {
-                     // Update Real-time Model Info for this chunk
                      let displayModel = "Gemini";
                      if (model.includes("pro")) displayModel = "Gemini Pro";
                      else if (model.includes("flash")) displayModel = "Gemini Flash";
                      
                      const msg = `${displayModel} ${keyIdx}`;
-                     setActiveKeyInfo(msg); // Update global header
-                     
-                     // Update chunk specific message
+                     setActiveKeyInfo(msg); 
                      setChunks(prev => prev.map(c => c.id === chunk.id ? { ...c, processingMessage: msg } : c));
                 };
 
@@ -275,7 +284,6 @@ export default function App() {
                     result = await processStatement({ text: text }, true, statusCallback);
                 }
 
-                // 3. Update status -> completed
                 setChunks(prev => prev.map(c => c.id === chunk.id ? { 
                     ...c, 
                     status: 'completed', 
@@ -302,21 +310,31 @@ export default function App() {
 
     // --- MERGE LOGIC ---
     const handleMergeResults = () => {
-        const completedChunks = chunks.filter(c => c.status === 'completed' && c.result);
-        if (completedChunks.length === 0) return;
-
-        let allTransactions: Transaction[] = [];
-        let firstAccountInfo = completedChunks[0].result?.accountInfo;
-        let globalOpening = completedChunks[0].result?.openingBalance || 0;
+        // Chỉ gộp những phần đã hoàn thành VÀ được tick chọn
+        const chunksToMerge = chunks.filter(c => c.status === 'completed' && c.result && c.isCheckedForMerge);
         
-        // Use user input opening balance if available
-        if (openingBalance) {
-            globalOpening = parseFloat(openingBalance.replace(/\./g, '')) || 0;
+        if (chunksToMerge.length === 0) {
+            alert("Vui lòng tick chọn ít nhất 1 phần để xem báo cáo.");
+            return;
         }
 
-        completedChunks.forEach(c => {
+        let allTransactions: Transaction[] = [];
+        let firstAccountInfo = chunksToMerge[0].result?.accountInfo;
+        
+        // Logic Số dư đầu kỳ thông minh:
+        // Nếu người dùng nhập tay ở Input -> Ưu tiên dùng.
+        // Nếu không nhập tay -> Lấy số dư đầu kỳ của Phần ĐƯỢC CHỌN ĐẦU TIÊN.
+        // Ví dụ: Chọn Phần 3 và 4 -> Lấy số dư đầu của Phần 3 (được AI trích xuất).
+        let globalOpening = 0;
+        
+        if (openingBalance) {
+            globalOpening = parseFloat(openingBalance.replace(/\./g, '')) || 0;
+        } else {
+            globalOpening = chunksToMerge[0].result?.openingBalance || 0;
+        }
+
+        chunksToMerge.forEach(c => {
             if (c.result?.transactions) {
-                // Filter invalid ones
                 const valid = c.result.transactions.filter(tx => 
                     !tx.description.toLowerCase().includes("số dư đầu kỳ") &&
                     !tx.description.toLowerCase().includes("cộng phát sinh")
@@ -325,7 +343,6 @@ export default function App() {
             }
         });
 
-        // Sort by date
         allTransactions.sort((a, b) => {
             const parseDate = (dateStr: string) => {
                 if (!dateStr) return 0;
@@ -336,7 +353,6 @@ export default function App() {
             return parseDate(a.date) - parseDate(b.date);
         });
 
-        // Calculate totals for ending balance
         const { totalDebit, totalCredit, totalFee, totalVat } = allTransactions.reduce((acc, tx) => ({
              totalDebit: acc.totalDebit + tx.debit,
              totalCredit: acc.totalCredit + tx.credit,
@@ -356,23 +372,15 @@ export default function App() {
         setIsMergedView(true);
     };
 
-    // --- TRANSACTION UPDATE HANDLERS (Delegated) ---
-    // Note: Updating transactions in 'merged' view only updates the temporary merged result.
-    // Ideally, we should trace back to the chunk, but for simplicity, we update the view data.
+    // --- WRAPPERS ---
     const handleTransactionUpdate = (index: number, field: any, value: any) => {
         if (isMergedView && mergedResult) {
             const updatedTx = [...mergedResult.transactions];
             updatedTx[index] = { ...updatedTx[index], [field]: value };
             setMergedResult({ ...mergedResult, transactions: updatedTx });
-        } else {
-            // Find which chunk this transaction belongs to is hard in separate view without ID
-            // For separate view, we render separate tables, so the ResultTable callback 
-            // will need to know which chunk it belongs to.
-            // We will handle this by passing a wrapper to ResultTable in the render loop.
         }
     };
     
-    // Wrapper to update specific chunk result
     const updateChunkResult = (chunkId: string, index: number, field: any, value: any) => {
         setChunks(prev => prev.map(c => {
             if (c.id === chunkId && c.result) {
@@ -417,12 +425,9 @@ export default function App() {
                         
                         <div className={`transition-opacity duration-300 ease-in-out ${isLoading && loadingState === 'processing' ? 'opacity-80 pointer-events-none' : ''}`}>
                             
-                            {/* BƯỚC 1: UPLOAD */}
+                            {/* BƯỚC 1, 2: GIỮ NGUYÊN */}
                             <div className="mb-6 border-b border-gray-200 pb-4 dark:border-gray-700">
-                                <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-2">
-                                    1. Upload file sao kê
-                                </label>
-                                
+                                <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-2">1. Upload file sao kê</label>
                                 {selectedFiles.length > 0 && (
                                     <div className="mb-3 space-y-2">
                                         {selectedFiles.map((file, idx) => (
@@ -433,7 +438,6 @@ export default function App() {
                                         ))}
                                     </div>
                                 )}
-
                                 <div className="space-y-2">
                                     <label htmlFor="file-upload" className={`cursor-pointer bg-white dark:bg-gray-700 rounded-md font-medium text-indigo-600 dark:text-indigo-400 border-2 border-dashed border-gray-300 dark:border-gray-600 flex flex-col items-center justify-center p-4 hover:border-indigo-500`}>
                                         <div className="flex items-center space-x-2">
@@ -442,41 +446,22 @@ export default function App() {
                                         </div>
                                         <input id="file-upload" type="file" className="sr-only" onChange={handleFileChange} accept=".pdf,.docx,.xlsx,.xls,.txt,.csv,.json,.png,.jpg,.jpeg" multiple/>
                                     </label>
-                                    
-                                    {uploadState === 'uploading' && (
-                                         <div className="w-full bg-gray-200 rounded-full h-1.5 mt-2"><div className="h-1.5 rounded-full bg-blue-500" style={{ width: `${uploadProgress}%` }}></div></div>
-                                    )}
+                                    {uploadState === 'uploading' && <div className="w-full bg-gray-200 rounded-full h-1.5 mt-2"><div className="h-1.5 rounded-full bg-blue-500" style={{ width: `${uploadProgress}%` }}></div></div>}
                                 </div>
                             </div>
 
-                            {/* BƯỚC 2: CẤU HÌNH & CHIA NHỎ */}
                             <div className="mb-6 border-b border-gray-200 pb-4 dark:border-gray-700">
-                                <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-2">
-                                    2. Cấu hình & Trích xuất
-                                </label>
-                                
+                                <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-2">2. Cấu hình & Trích xuất</label>
                                 <div className="flex flex-col gap-2 mb-3">
                                     <span className="text-xs text-gray-500">AI sẽ tự động đề xuất cách chia nhỏ dựa trên dung lượng file.</span>
-                                    <select 
-                                        value={chunkStrategy}
-                                        onChange={(e) => setChunkStrategy(e.target.value as ChunkStrategy)}
-                                        className="block w-full px-3 py-2 text-sm bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md focus:ring-indigo-500"
-                                        disabled={loadingState === 'extracting'}
-                                    >
+                                    <select value={chunkStrategy} onChange={(e) => setChunkStrategy(e.target.value as ChunkStrategy)} className="block w-full px-3 py-2 text-sm bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md focus:ring-indigo-500" disabled={loadingState === 'extracting'}>
                                         <option value="500">500 dòng/phần {recommendedStrategy === '500' ? '(Khuyên dùng)' : ''}</option>
                                         <option value="200">200 dòng/phần {recommendedStrategy === '200' ? '(Khuyên dùng - File lớn)' : ''}</option>
                                         <option value="1000">1000 dòng/phần</option>
                                         <option value="ALL">Gửi toàn bộ {recommendedStrategy === 'ALL' ? '(Khuyên dùng - File nhỏ)' : ''}</option>
                                     </select>
                                 </div>
-
-                                <button
-                                    onClick={handleExtractText}
-                                    disabled={selectedFiles.length === 0 || loadingState === 'extracting'}
-                                    className={`w-full flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md transition-all
-                                        ${selectedFiles.length > 0 && uploadState !== 'uploading' ? 'text-white bg-indigo-600 hover:bg-indigo-700' : 'bg-gray-100 text-gray-400 cursor-not-allowed'}
-                                    `}
-                                >
+                                <button onClick={handleExtractText} disabled={selectedFiles.length === 0 || loadingState === 'extracting'} className={`w-full flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md transition-all ${selectedFiles.length > 0 && uploadState !== 'uploading' ? 'text-white bg-indigo-600 hover:bg-indigo-700' : 'bg-gray-100 text-gray-400 cursor-not-allowed'}`}>
                                     {loadingState === 'extracting' ? <><ProcessIcon /> Đang phân tích...</> : `Trích xuất & Chia nhỏ`}
                                 </button>
                             </div>
@@ -493,27 +478,15 @@ export default function App() {
                                             <button onClick={() => toggleAllChunks(false)} className="text-xs text-gray-500 hover:underline">Bỏ chọn</button>
                                         </div>
                                     </div>
-                                    
                                     <div className="max-h-60 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
                                         {chunks.map((chunk) => (
                                             <div key={chunk.id} className={`p-3 rounded-lg border text-sm transition-colors ${chunk.isSelected ? 'border-blue-400 bg-blue-50 dark:bg-blue-900/20' : 'border-gray-200 bg-gray-50 dark:bg-gray-700 opacity-70'}`}>
                                                 <div className="flex items-start gap-3">
-                                                    <input 
-                                                        type="checkbox" 
-                                                        checked={chunk.isSelected} 
-                                                        onChange={() => toggleChunkSelection(chunk.id)}
-                                                        className="mt-1 h-4 w-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
-                                                    />
+                                                    <input type="checkbox" checked={chunk.isSelected} onChange={() => toggleChunkSelection(chunk.id)} className="mt-1 h-4 w-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"/>
                                                     <div className="flex-1 min-w-0">
                                                         <div className="flex justify-between">
                                                             <span className="font-semibold text-gray-800 dark:text-gray-200">Phần {chunk.index} ({chunk.type})</span>
-                                                            <span className={`text-xs px-2 py-0.5 rounded-full ${
-                                                                chunk.status === 'completed' ? 'bg-green-100 text-green-800' :
-                                                                chunk.status === 'processing' ? 'bg-yellow-100 text-yellow-800' :
-                                                                chunk.status === 'error' ? 'bg-red-100 text-red-800' : 'bg-gray-200 text-gray-600'
-                                                            }`}>
-                                                                {chunk.status === 'processing' ? 'Đang chạy...' : chunk.status}
-                                                            </span>
+                                                            <span className={`text-xs px-2 py-0.5 rounded-full ${chunk.status === 'completed' ? 'bg-green-100 text-green-800' : chunk.status === 'processing' ? 'bg-yellow-100 text-yellow-800' : chunk.status === 'error' ? 'bg-red-100 text-red-800' : 'bg-gray-200 text-gray-600'}`}>{chunk.status === 'processing' ? 'Đang chạy...' : chunk.status}</span>
                                                         </div>
                                                         <div className="mt-1 text-xs text-gray-500 font-mono bg-white dark:bg-gray-800 p-1.5 rounded border border-gray-100 dark:border-gray-600">
                                                             <div className="text-blue-600">{chunk.previewStart}</div>
@@ -530,19 +503,8 @@ export default function App() {
 
                              {/* BƯỚC 4: SỐ DƯ */}
                              <div className="mb-4">
-                                <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-1">
-                                    4. Số dư đầu kỳ (Tùy chọn)
-                                </label>
-                                <input
-                                    type="text"
-                                    value={openingBalance ? new Intl.NumberFormat('vi-VN').format(parseFloat(openingBalance.replace(/\./g, ''))) : ''}
-                                    onChange={(e) => {
-                                        const value = e.target.value.replace(/\./g, '');
-                                        if (!isNaN(parseFloat(value)) || value === '') setOpeningBalance(value);
-                                    }}
-                                    placeholder="Nhập số dư đầu kỳ..."
-                                    className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 focus:ring-indigo-500"
-                                />
+                                <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-1">4. Số dư đầu kỳ (Tùy chọn)</label>
+                                <input type="text" value={openingBalance ? new Intl.NumberFormat('vi-VN').format(parseFloat(openingBalance.replace(/\./g, ''))) : ''} onChange={(e) => { const value = e.target.value.replace(/\./g, ''); if (!isNaN(parseFloat(value)) || value === '') setOpeningBalance(value); }} placeholder="Nhập số dư đầu kỳ..." className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 focus:ring-indigo-500"/>
                             </div>
 
                              {/* BƯỚC 5: XỬ LÝ */}
@@ -556,53 +518,55 @@ export default function App() {
                                         <div className="w-full bg-gray-200 rounded-full h-2"><div className="bg-green-500 h-2 rounded-full transition-all" style={{ width: `${globalProgress}%` }}></div></div>
                                     </div>
                                 )}
-
-                                <button
-                                    onClick={handleSubmit}
-                                    disabled={isLoading || chunks.length === 0}
-                                    className="w-full flex items-center justify-center px-6 py-3 border border-transparent text-base font-bold rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 disabled:bg-green-400 disabled:cursor-not-allowed transition-colors"
-                                >
-                                    {loadingState === 'processing' 
-                                    ? <><ProcessIcon /> Đang xử lý ({activeKeyInfo || 'Gemini'})...</> 
-                                    : '5. Bắt đầu Xử lý'}
+                                <button onClick={handleSubmit} disabled={isLoading || chunks.length === 0} className="w-full flex items-center justify-center px-6 py-3 border border-transparent text-base font-bold rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 disabled:bg-green-400 disabled:cursor-not-allowed transition-colors">
+                                    {loadingState === 'processing' ? <><ProcessIcon /> Đang xử lý ({activeKeyInfo || 'Gemini'})...</> : '5. Bắt đầu Xử lý'}
                                 </button>
                              </div>
                              
-                             {error && (
-                                <div className="mt-4 p-3 bg-red-100 text-red-700 text-sm rounded border border-red-300">
-                                    {error}
-                                </div>
-                            )}
+                             {error && <div className="mt-4 p-3 bg-red-100 text-red-700 text-sm rounded border border-red-300">{error}</div>}
                         </div>
                     </div>
 
                     {/* RIGHT COLUMN: RESULTS */}
                     <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg min-h-[500px] flex flex-col">
-                        <div className="flex justify-between items-center mb-4">
+                        <div className="flex justify-between items-center mb-4 flex-wrap gap-2">
                             <h2 className="text-2xl font-bold text-gray-800 dark:text-gray-200">KẾT QUẢ</h2>
                             <div className="space-x-2">
-                                <button 
-                                    onClick={() => setIsMergedView(false)}
-                                    className={`px-3 py-1 text-sm rounded-md transition-colors ${!isMergedView ? 'bg-indigo-100 text-indigo-700 font-bold' : 'text-gray-500 hover:bg-gray-100'}`}
-                                >
+                                <button onClick={() => setIsMergedView(false)} className={`px-3 py-1 text-sm rounded-md transition-colors ${!isMergedView ? 'bg-indigo-100 text-indigo-700 font-bold' : 'text-gray-500 hover:bg-gray-100'}`}>
                                     Từng phần
                                 </button>
-                                <button 
-                                    onClick={handleMergeResults}
-                                    className={`px-3 py-1 text-sm rounded-md transition-colors ${isMergedView ? 'bg-indigo-100 text-indigo-700 font-bold' : 'text-gray-500 hover:bg-gray-100'}`}
-                                    disabled={chunks.filter(c => c.status === 'completed').length < 2}
-                                >
-                                    Gộp tất cả
+                                <button onClick={handleMergeResults} className={`px-3 py-1 text-sm rounded-md transition-colors ${isMergedView ? 'bg-indigo-100 text-indigo-700 font-bold' : 'text-gray-500 hover:bg-gray-100'}`}>
+                                    Gộp đã chọn
                                 </button>
                             </div>
                         </div>
+
+                        {/* Controls for Separate View */}
+                        {!isMergedView && chunks.some(c => c.status === 'completed') && (
+                            <div className="flex justify-between items-center mb-3 bg-gray-100 dark:bg-gray-700 p-2 rounded text-xs text-gray-600 dark:text-gray-300">
+                                <div className="space-x-3">
+                                    <label className="inline-flex items-center cursor-pointer hover:text-indigo-500">
+                                        <input type="checkbox" className="mr-1 rounded text-indigo-600 focus:ring-indigo-500" 
+                                            checked={chunks.filter(c => c.status === 'completed').every(c => c.isCheckedForMerge)}
+                                            onChange={(e) => toggleAllMergeCheckbox(e.target.checked)}
+                                        />
+                                        Chọn tất cả để gộp
+                                    </label>
+                                </div>
+                                <div className="space-x-2">
+                                    <button onClick={() => toggleAllResultsExpand(true)} className="hover:text-indigo-500">Mở rộng hết</button>
+                                    <span>|</span>
+                                    <button onClick={() => toggleAllResultsExpand(false)} className="hover:text-indigo-500">Thu gọn hết</button>
+                                </div>
+                            </div>
+                        )}
 
                         <div className="flex-1 overflow-y-auto custom-scrollbar">
                             {/* VIEW: MERGED */}
                             {isMergedView && mergedResult && (
                                 <div>
                                     <div className="mb-4 p-2 bg-indigo-50 border border-indigo-200 text-indigo-800 rounded text-center text-sm">
-                                        Đang xem bảng gộp từ {chunks.filter(c=>c.status==='completed').length} phần.
+                                        Đang xem bảng gộp của <b>{chunks.filter(c => c.isCheckedForMerge && c.status === 'completed').length}</b> phần được chọn.
                                     </div>
                                     <ResultTable 
                                         accountInfo={mergedResult.accountInfo} 
@@ -624,22 +588,45 @@ export default function App() {
 
                             {/* VIEW: SEPARATE LIST */}
                             {!isMergedView && (
-                                <div className="space-y-8">
+                                <div className="space-y-4">
                                     {chunks.filter(c => c.status === 'completed' && c.result).map((chunk) => (
-                                        <div key={chunk.id} className="border border-gray-200 dark:border-gray-700 rounded-lg p-4 bg-gray-50 dark:bg-gray-900/30">
-                                            <div className="flex items-center gap-2 mb-2">
-                                                <span className="font-bold text-lg text-indigo-600">Phần {chunk.index}</span>
-                                                <span className="text-xs text-gray-400">({chunk.processingMessage})</span>
+                                        <div key={chunk.id} className="border border-gray-200 dark:border-gray-700 rounded-lg bg-gray-50 dark:bg-gray-900/30 overflow-hidden">
+                                            {/* HEADER CARD */}
+                                            <div className="p-3 bg-gray-100 dark:bg-gray-800 flex items-center justify-between cursor-pointer select-none" onClick={() => toggleResultExpand(chunk.id)}>
+                                                <div className="flex items-center gap-3" onClick={(e) => e.stopPropagation()}>
+                                                    <input 
+                                                        type="checkbox" 
+                                                        className="h-5 w-5 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                                                        checked={chunk.isCheckedForMerge}
+                                                        onChange={() => toggleMergeCheckbox(chunk.id)}
+                                                        title="Tick để chọn gộp phần này"
+                                                    />
+                                                    <span className="font-bold text-gray-700 dark:text-gray-200" onClick={() => toggleResultExpand(chunk.id)}>
+                                                        Phần {chunk.index} 
+                                                        <span className="ml-2 text-xs font-normal text-gray-500">({chunk.processingMessage}) - {chunk.result?.transactions.length} dòng</span>
+                                                    </span>
+                                                </div>
+                                                <button className="text-gray-500 hover:text-indigo-600 transition-colors transform duration-200" style={{ transform: chunk.isResultExpanded ? 'rotate(180deg)' : 'rotate(0deg)' }}>
+                                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                                        <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
+                                                    </svg>
+                                                </button>
                                             </div>
-                                            {chunk.result && (
-                                                <ResultTable 
-                                                    accountInfo={chunk.result.accountInfo} 
-                                                    transactions={chunk.result.transactions} 
-                                                    openingBalance={chunk.index === 1 ? (parseFloat(openingBalance) || chunk.result.openingBalance) : 0} // Chỉ phần 1 mới hiện Opening Balance user nhập
-                                                    onUpdateTransaction={(idx, f, v) => updateChunkResult(chunk.id, idx, f, v)}
-                                                    onUpdateTransactionString={(idx, f, v) => updateChunkResultString(chunk.id, idx, f, v)}
-                                                    balanceMismatchWarning={null}
-                                                />
+
+                                            {/* CONTENT */}
+                                            {chunk.isResultExpanded && chunk.result && (
+                                                <div className="p-4 border-t border-gray-200 dark:border-gray-700">
+                                                    <ResultTable 
+                                                        accountInfo={chunk.result.accountInfo} 
+                                                        transactions={chunk.result.transactions} 
+                                                        // Nếu phần này được chọn đầu tiên trong danh sách merge -> Dùng số dư đầu kỳ user nhập
+                                                        // Nếu không -> Dùng số dư đầu do AI trích xuất
+                                                        openingBalance={chunk.index === 1 ? (parseFloat(openingBalance) || chunk.result.openingBalance) : chunk.result.openingBalance} 
+                                                        onUpdateTransaction={(idx, f, v) => updateChunkResult(chunk.id, idx, f, v)}
+                                                        onUpdateTransactionString={(idx, f, v) => updateChunkResultString(chunk.id, idx, f, v)}
+                                                        balanceMismatchWarning={null}
+                                                    />
+                                                </div>
                                             )}
                                         </div>
                                     ))}

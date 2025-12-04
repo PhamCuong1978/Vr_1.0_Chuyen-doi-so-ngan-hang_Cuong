@@ -52,9 +52,13 @@ export interface ProcessedChunk {
     data: string; // Full content for AI
     previewStart: string; // First 3 lines
     previewEnd: string; // Last 3 lines
-    isSelected: boolean;
+    isSelected: boolean; // Selected for PROCESSING
     status: 'idle' | 'processing' | 'completed' | 'error';
     processingMessage?: string; // e.g., "Gemini Pro 1"
     result?: GeminiResponse;
     error?: string;
+    
+    // UI States for Result View
+    isResultExpanded?: boolean; // Toggle Collapse/Expand in Result view
+    isCheckedForMerge?: boolean; // Selected for MERGING
 }
