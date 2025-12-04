@@ -27,7 +27,8 @@ export default function App() {
 
     const [loadingState, setLoadingState] = useState<LoadingState>('idle');
     const [progress, setProgress] = useState(0);
-    const [processingStatus, setProcessingStatus] = useState<string>(''); 
+    const [processingStatus, setProcessingStatus] = useState<string>('');
+    const [activeKeyInfo, setActiveKeyInfo] = useState<string>(''); // Lưu trữ thông tin key/model đang chạy (VD: Gemini Pro 1)
 
     const [error, setError] = useState<string | null>(null);
     const [result, setResult] = useState<GeminiResponse | null>(null);
@@ -197,15 +198,29 @@ export default function App() {
         setResult(null);
         setBalanceMismatchWarning(null);
         setHistory([]); 
+        setActiveKeyInfo(''); // Reset key info
         
         setProgress(0);
-        setProcessingStatus(`Chuẩn bị gửi dữ liệu tới Gemini Pro...`);
+        setProcessingStatus(`Đang khởi tạo Gemini...`);
 
         try {
-            const data = await processBatchData(processedChunks, (current, total) => {
+            const data = await processBatchData(processedChunks, (current, total, modelName, keyIndex) => {
                 const percent = Math.round((current / total) * 100);
                 setProgress(percent);
-                setProcessingStatus(`Gemini Pro/Flash đang xử lý phần ${current}/${total} (${percent}%)`);
+                
+                // Format Model Name để hiển thị đẹp hơn
+                let displayModel = "Gemini";
+                if (modelName) {
+                    if (modelName.includes("pro")) displayModel = "Gemini Pro";
+                    else if (modelName.includes("flash")) displayModel = "Gemini Flash";
+                    else displayModel = modelName;
+                }
+                
+                // Chuỗi hiển thị: "Gemini Pro 1", "Gemini Flash 2"...
+                const keyInfoStr = `${displayModel} ${keyIndex || 1}`;
+                setActiveKeyInfo(keyInfoStr);
+
+                setProcessingStatus(`Đang xử lý phần ${current}/${total} (${keyInfoStr})`);
             });
             
             setOpeningBalance(data.openingBalance?.toString() ?? '0');
@@ -238,6 +253,7 @@ export default function App() {
         } finally {
             setLoadingState('idle');
             setProcessingStatus('Hoàn tất!');
+            setActiveKeyInfo('');
         }
     };
     
@@ -491,7 +507,9 @@ export default function App() {
                                  disabled={isLoading || processedChunks.length === 0}
                                  className="w-full flex items-center justify-center px-6 py-3 border border-transparent text-base font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:bg-green-400 disabled:cursor-not-allowed transition-colors"
                              >
-                                 {loadingState === 'processing' ? <><ProcessIcon /> Đang xử lý (Gemini Pro)...</> : '5. Bắt đầu Xử lý (Gemini Pro)'}
+                                 {loadingState === 'processing' 
+                                    ? <><ProcessIcon /> Đang xử lý ({activeKeyInfo || 'Gemini Pro'})...</> 
+                                    : '5. Bắt đầu Xử lý (Gemini Pro)'}
                              </button>
                          </div>
                     </div>

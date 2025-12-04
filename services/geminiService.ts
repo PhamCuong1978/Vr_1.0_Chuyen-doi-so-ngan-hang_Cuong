@@ -142,6 +142,7 @@ const cleanAndParseJSON = <T>(text: string | undefined | null): T => {
 interface AIRequestConfig {
     messages: Array<{role: string, content: string}>;
     jsonMode: boolean;
+    onStatusUpdate?: (model: string, keyIndex: number) => void;
 }
 
 const callGoogleAI = async (apiKey: string, model: string, config: AIRequestConfig): Promise<string> => {
@@ -183,7 +184,11 @@ const callGoogleAI = async (apiKey: string, model: string, config: AIRequestConf
     return result.text || "";
 };
 
-const callAIUnified = async (messages: Array<{role: string, content: string}>, jsonMode: boolean = true): Promise<string> => {
+const callAIUnified = async (
+    messages: Array<{role: string, content: string}>, 
+    jsonMode: boolean = true,
+    onStatusUpdate?: (model: string, keyIndex: number) => void
+): Promise<string> => {
     const keys = getAPIKeys();
     
     if (keys.length === 0) {
@@ -205,6 +210,12 @@ const callAIUnified = async (messages: Array<{role: string, content: string}>, j
 
         for (let i = 0; i < keys.length; i++) {
             const currentKey = keys[i];
+            
+            // Báo cáo trạng thái hiện tại ra UI
+            if (onStatusUpdate) {
+                onStatusUpdate(model, i + 1);
+            }
+
             try {
                 // console.log(`Attempting Model [${model}] with Key index [${i}]`);
                 return await callGoogleAI(currentKey, model, { messages, jsonMode });
@@ -219,7 +230,7 @@ const callAIUnified = async (messages: Array<{role: string, content: string}>, j
                 lastError = err;
 
                 if (isQuotaError) {
-                    console.warn(`⚠️ Model [${model}] Key [${i}] bị hết Quota/Overloaded. Thử Key tiếp theo...`);
+                    console.warn(`⚠️ Model [${model}] Key [${i + 1}] bị hết Quota/Overloaded. Thử Key tiếp theo...`);
                     // Tiếp tục vòng lặp keys
                     continue; 
                 } else {
@@ -273,7 +284,11 @@ export const extractTextFromContent = async (content: { images: { mimeType: stri
 /**
  * Xử lý chính
  */
-export const processStatement = async (content: { text: string; }, isPartial: boolean = false): Promise<GeminiResponse> => {
+export const processStatement = async (
+    content: { text: string; }, 
+    isPartial: boolean = false,
+    onStatusUpdate?: (model: string, keyIndex: number) => void
+): Promise<GeminiResponse> => {
     const systemPrompt = `Bạn là Chuyên gia Xử lý Dữ liệu Kế toán (Google Gemini AI).
     Nhiệm vụ: Chuyển đổi văn bản sao kê ngân hàng thành JSON chuẩn RFC 8259.
 
@@ -317,10 +332,14 @@ export const processStatement = async (content: { text: string; }, isPartial: bo
     const userPrompt = `Dữ liệu sao kê (Raw Text):\n\n${content.text}`;
 
     // Gọi Unified AI Caller (Tự động Pro -> Flash, Tự động đổi Key)
-    const jsonString = await callAIUnified([
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt }
-    ]);
+    const jsonString = await callAIUnified(
+        [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt }
+        ], 
+        true,
+        onStatusUpdate // Truyền callback xuống
+    );
     return cleanAndParseJSON<GeminiResponse>(jsonString);
 };
 
@@ -329,7 +348,7 @@ export const processStatement = async (content: { text: string; }, isPartial: bo
  */
 export const processBatchData = async (
     chunks: { type: 'text' | 'image', data: string }[],
-    onProgress: (current: number, total: number) => void
+    onProgress: (current: number, total: number, modelName?: string, keyIndex?: number) => void
 ): Promise<GeminiResponse> => {
     
     let combinedTransactions: Transaction[] = [];
@@ -341,8 +360,19 @@ export const processBatchData = async (
 
     const BASE_DELAY = 1000; // Tăng delay nhẹ để tránh spam quá nhanh
 
+    // Callback wrapper để nhận thông tin từ tầng dưới
+    let currentModelName = "";
+    let currentKeyIndex = 0;
+
+    const statusCallback = (model: string, keyIdx: number) => {
+        currentModelName = model;
+        currentKeyIndex = keyIdx;
+    };
+
     for (let i = 0; i < chunks.length; i++) {
-        onProgress(i + 1, chunks.length);
+        // Gọi progress ban đầu
+        onProgress(i + 1, chunks.length, currentModelName, currentKeyIndex);
+        
         if (i > 0) await delay(BASE_DELAY);
 
         const chunk = chunks[i];
@@ -350,10 +380,10 @@ export const processBatchData = async (
 
         try {
             if (chunk.type === 'text') {
-                result = await processStatement({ text: chunk.data }, true);
+                result = await processStatement({ text: chunk.data }, true, statusCallback);
             } else {
                 const text = await extractTextFromContent({ images: [{ mimeType: 'image/jpeg', data: chunk.data }] });
-                result = await processStatement({ text: text }, true);
+                result = await processStatement({ text: text }, true, statusCallback);
             }
         } catch (err: any) {
             console.error(`Lỗi xử lý phần ${i + 1}:`, err);
@@ -361,12 +391,15 @@ export const processBatchData = async (
             await delay(3000);
             try {
                  if (chunk.type === 'text') {
-                    result = await processStatement({ text: chunk.data }, true);
+                    result = await processStatement({ text: chunk.data }, true, statusCallback);
                 } 
             } catch (retryErr) {
                 console.error("Retry failed for chunk " + i);
             }
         }
+        
+        // Cập nhật lại UI với model/key đã dùng thành công
+        onProgress(i + 1, chunks.length, currentModelName, currentKeyIndex);
 
         if (result) {
             if (result.transactions && Array.isArray(result.transactions)) {
