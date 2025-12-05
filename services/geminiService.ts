@@ -362,15 +362,19 @@ export const processStatement = async (
     - **BỎ QUA TIÊU ĐỀ LẶP LẠI**: Trong văn bản dài, tiêu đề cột (như "Ngày", "Số dư", "Diễn giải", "Debit", "Credit", "Trang...") thường lặp lại. Hãy **BỎ QUA** chúng, không được coi là dữ liệu.
     - **Số lượng**: Không được tự ý sinh thêm dòng dữ liệu không có trong văn bản gốc.
 
-    ### 2. MAPPING KẾ TOÁN (NGUYÊN TẮC ĐẢO):
+    ### 2. SỐ DƯ (QUAN TRỌNG ĐỂ ĐỐI CHIẾU):
+    - **openingBalance**: Tìm "Số dư đầu kỳ" hoặc số dư dòng đầu tiên.
+    - **endingBalance**: Tìm "Số dư cuối kỳ" hoặc số dư tại dòng giao dịch cuối cùng trong văn bản. Nếu không thấy ghi rõ, hãy lấy số dư lũy kế tại dòng cuối cùng.
+
+    ### 3. MAPPING KẾ TOÁN (NGUYÊN TẮC ĐẢO):
     - **Ghi Nợ (Debit)** trên sao kê = **TIỀN RA** (Doanh nghiệp giảm) -> Gán vào JSON **'credit'**.
     - **Ghi Có (Credit)** trên sao kê = **TIỀN VÀO** (Doanh nghiệp tăng) -> Gán vào JSON **'debit'**.
 
-    ### 3. QUY TẮC "ĐƠN NHẤT" CHO DỮ LIỆU SỐ:
+    ### 4. QUY TẮC "ĐƠN NHẤT" CHO DỮ LIỆU SỐ:
     - **MỘT SỐ TIỀN CHỈ XUẤT HIỆN 1 LẦN DUY NHẤT**: Không bao giờ được copy/nhân bản số tiền từ cột này sang cột khác.
     - **KHI NÀO MỚI DÙNG TRƯỜNG 'fee' / 'vat'?**: Chỉ khi có cột vật lý riêng biệt. Nếu không, gộp hết vào 'credit'/'debit'. Mặc định 'fee' = 0, 'vat' = 0.
 
-    ### 4. CẤU TRÚC JSON OUTPUT:
+    ### 5. CẤU TRÚC JSON OUTPUT:
     {
         "openingBalance": number, 
         "endingBalance": number,
@@ -480,6 +484,7 @@ export const processBatchData = async (
                 finalOpeningBalance = result.openingBalance;
                 foundOpening = true;
             }
+            // Logic lấy số dư cuối cùng: Lấy của phần mới nhất (nếu có)
             if (result.endingBalance > 0) {
                 finalEndingBalance = result.endingBalance;
             }

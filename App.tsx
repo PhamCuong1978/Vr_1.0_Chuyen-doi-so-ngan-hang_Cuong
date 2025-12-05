@@ -311,7 +311,7 @@ export default function App() {
         setActiveKeyInfo('');
     };
 
-    // --- MERGE LOGIC ---
+    // --- MERGE LOGIC WITH RECONCILIATION ---
     const handleMergeResults = () => {
         // Chỉ gộp những phần đã hoàn thành VÀ được tick chọn
         const chunksToMerge = chunks.filter(c => c.status === 'completed' && c.result && c.isCheckedForMerge);
@@ -321,22 +321,31 @@ export default function App() {
             return;
         }
 
+        // Sắp xếp lại theo index để đảm bảo thứ tự
+        const sortedChunks = [...chunksToMerge].sort((a, b) => a.index - b.index);
+
         let allTransactions: Transaction[] = [];
-        let firstAccountInfo = chunksToMerge[0].result?.accountInfo;
+        let firstAccountInfo = sortedChunks[0].result?.accountInfo;
         
-        // Logic Số dư đầu kỳ thông minh:
+        // 1. Logic Số dư đầu kỳ (Opening Balance)
         // Nếu người dùng nhập tay ở Input -> Ưu tiên dùng.
-        // Nếu không nhập tay -> Lấy số dư đầu kỳ của Phần ĐƯỢC CHỌN ĐẦU TIÊN.
-        // Ví dụ: Chọn Phần 3 và 4 -> Lấy số dư đầu của Phần 3 (được AI trích xuất).
+        // Nếu không nhập tay -> Lấy số dư đầu kỳ của Phần ĐƯỢC CHỌN ĐẦU TIÊN (Sorted Chunk 0).
         let globalOpening = 0;
         
         if (openingBalance) {
             globalOpening = parseFloat(openingBalance.replace(/\./g, '')) || 0;
         } else {
-            globalOpening = chunksToMerge[0].result?.openingBalance || 0;
+            globalOpening = sortedChunks[0].result?.openingBalance || 0;
         }
 
-        chunksToMerge.forEach(c => {
+        // 2. Logic Số dư cuối kỳ Đọc được (Detected Closing Balance)
+        // Lấy từ phần cuối cùng (được chọn) có thông tin endingBalance > 0
+        // Ưu tiên phần cuối cùng tuyệt đối.
+        const lastChunk = sortedChunks[sortedChunks.length - 1];
+        const detectedEnding = lastChunk.result?.endingBalance || 0;
+
+        // 3. Tổng hợp giao dịch
+        sortedChunks.forEach(c => {
             if (c.result?.transactions) {
                 const valid = c.result.transactions.filter(tx => 
                     !tx.description.toLowerCase().includes("số dư đầu kỳ") &&
@@ -363,7 +372,18 @@ export default function App() {
              totalVat: acc.totalVat + (tx.vat || 0),
         }), { totalDebit: 0, totalCredit: 0, totalFee: 0, totalVat: 0 });
 
+        // 4. Tính toán số dư cuối (Calculated Closing Balance)
+        // SDCK = SDĐK + Tổng Tiền Vào (Debit) - Tổng Tiền Ra (Credit + Fee + VAT)
         const calculatedEnding = globalOpening + totalDebit - totalCredit - totalFee - totalVat;
+
+        // 5. Đối chiếu (Reconciliation)
+        const diff = Math.abs(calculatedEnding - detectedEnding);
+        // Cho phép sai số nhỏ (100đ) do làm tròn
+        if (diff > 100 && detectedEnding !== 0) {
+            setBalanceMismatchWarning(`LỆCH SỐ LIỆU: Số dư trên file (Cuối phần ${lastChunk.index}) là ${formatCurrency(detectedEnding)}, nhưng tính toán ra ${formatCurrency(calculatedEnding)}. Chênh lệch: ${formatCurrency(diff)}.`);
+        } else {
+            setBalanceMismatchWarning(null); // Khớp
+        }
 
         setMergedResult({
             accountInfo: firstAccountInfo || { accountName: '', accountNumber: '', bankName: '', branch: '' },
@@ -507,7 +527,7 @@ export default function App() {
 
                              {/* BƯỚC 4: SỐ DƯ */}
                              <div className="mb-4">
-                                <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-1">4. Số dư đầu kỳ (Tùy chọn)</label>
+                                <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-1">4. Số dư đầu kỳ (Tùy chọn - Sẽ ưu tiên hơn AI)</label>
                                 <input type="text" value={openingBalance ? new Intl.NumberFormat('vi-VN').format(parseFloat(openingBalance.replace(/\./g, ''))) : ''} onChange={(e) => { const value = e.target.value.replace(/\./g, ''); if (!isNaN(parseFloat(value)) || value === '') setOpeningBalance(value); }} placeholder="Nhập số dư đầu kỳ..." className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 focus:ring-indigo-500"/>
                             </div>
 
@@ -540,7 +560,7 @@ export default function App() {
                                     Từng phần
                                 </button>
                                 <button onClick={handleMergeResults} className={`px-3 py-1 text-sm rounded-md transition-colors ${isMergedView ? 'bg-indigo-100 text-indigo-700 font-bold' : 'text-gray-500 hover:bg-gray-100'}`}>
-                                    Gộp đã chọn
+                                    Gộp & Đối chiếu
                                 </button>
                             </div>
                         </div>
@@ -578,7 +598,7 @@ export default function App() {
                                         openingBalance={mergedResult.openingBalance}
                                         onUpdateTransaction={(idx, field, val) => handleTransactionUpdate(idx, field, val)}
                                         onUpdateTransactionString={(idx, field, val) => handleTransactionUpdate(idx, field, val)}
-                                        balanceMismatchWarning={null}
+                                        balanceMismatchWarning={balanceMismatchWarning}
                                     />
                                     <ChatAssistant 
                                         reportData={mergedResult}
@@ -628,7 +648,7 @@ export default function App() {
                                                         openingBalance={chunk.index === 1 ? (parseFloat(openingBalance) || chunk.result.openingBalance) : chunk.result.openingBalance} 
                                                         onUpdateTransaction={(idx, f, v) => updateChunkResult(chunk.id, idx, f, v)}
                                                         onUpdateTransactionString={(idx, f, v) => updateChunkResultString(chunk.id, idx, f, v)}
-                                                        balanceMismatchWarning={null}
+                                                        balanceMismatchWarning={null} // Không hiện warning ở view lẻ
                                                     />
                                                 </div>
                                             )}
