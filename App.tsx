@@ -457,6 +457,7 @@ export default function App() {
                                     <select value={chunkStrategy} onChange={(e) => setChunkStrategy(e.target.value as ChunkStrategy)} className="block w-full px-3 py-2 text-sm bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md focus:ring-indigo-500" disabled={loadingState === 'extracting'}>
                                         <option value="500">500 dòng/phần {recommendedStrategy === '500' ? '(Khuyên dùng)' : ''}</option>
                                         <option value="200">200 dòng/phần {recommendedStrategy === '200' ? '(Khuyên dùng - File lớn)' : ''}</option>
+                                        <option value="100">100 dòng/phần</option>
                                         <option value="1000">1000 dòng/phần</option>
                                         <option value="ALL">Gửi toàn bộ {recommendedStrategy === 'ALL' ? '(Khuyên dùng - File nhỏ)' : ''}</option>
                                     </select>

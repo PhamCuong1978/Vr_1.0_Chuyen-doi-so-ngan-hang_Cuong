@@ -41,8 +41,8 @@ export const extractFromFile = async (file: File): Promise<{ text: string | null
                         await new Promise(resolve => setTimeout(resolve, 10));
 
                         const page = await pdf.getPage(i);
-                        // Scale 2.0 đủ nét cho OCR
-                        const viewport = page.getViewport({ scale: 2.0 }); 
+                        // Scale 1.8 đủ nét cho OCR nhưng nhẹ hơn 2.0 để tránh lỗi XHR Network Error
+                        const viewport = page.getViewport({ scale: 1.8 }); 
                         const canvas = document.createElement('canvas');
                         const context = canvas.getContext('2d');
                         if (!context) throw new Error('Lỗi khởi tạo Canvas');
@@ -52,8 +52,8 @@ export const extractFromFile = async (file: File): Promise<{ text: string | null
 
                         await page.render({ canvasContext: context, viewport: viewport }).promise;
                         
-                        // Xuất JPEG 0.85 để tối ưu dung lượng upload
-                        const dataUrl = canvas.toDataURL('image/jpeg', 0.85); 
+                        // Xuất JPEG 0.8 để tối ưu dung lượng upload (giảm nguy cơ lỗi Payload too large)
+                        const dataUrl = canvas.toDataURL('image/jpeg', 0.8); 
                         const base64Data = dataUrl.split(',')[1];
                         pageImages.push({ mimeType: 'image/jpeg', data: base64Data });
                     }

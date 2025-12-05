@@ -33,8 +33,8 @@ const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 // --- HELPER: JSON REPAIR & PARSER ---
 const robustJSONRepair = (jsonStr: string): string => {
-    let repaired = jsonStr.trim();
-    repaired = repaired.replace(/[\u201C\u201D]/g, '"');
+    // 1. Pre-process: Replace smart quotes with standard quotes
+    let repaired = jsonStr.trim().replace(/[\u201C\u201D]/g, '"');
 
     try {
         let segments: string[] = [];
@@ -42,9 +42,11 @@ const robustJSONRepair = (jsonStr: string): string => {
         let inString = false;
         let i = 0;
         
+        // 2. Phân tách chuỗi thành các segment: String Literal vs Syntax
         while (i < repaired.length) {
             const char = repaired[i];
             if (char === '"') {
+                // Check if the quote is escaped (lookup backwards)
                 let backslashCount = 0;
                 let j = i - 1;
                 while (j >= 0 && repaired[j] === '\\') { backslashCount++; j--; }
@@ -52,13 +54,15 @@ const robustJSONRepair = (jsonStr: string): string => {
                 
                 if (!isEscaped) {
                     if (!inString) {
-                        segments.push(currentSegment);
-                        currentSegment = '"';
+                        // START of a string
+                        segments.push(currentSegment); // Push previous syntax
+                        currentSegment = '"'; // Start new segment with quote
                         inString = true;
                     } else {
-                        currentSegment += '"';
-                        segments.push(currentSegment);
-                        currentSegment = '';
+                        // END of a string
+                        currentSegment += '"'; // Append closing quote
+                        segments.push(currentSegment); // Push string segment
+                        currentSegment = ''; // Reset for next syntax
                         inString = false;
                     }
                 } else {
@@ -69,25 +73,54 @@ const robustJSONRepair = (jsonStr: string): string => {
             }
             i++;
         }
-        segments.push(currentSegment);
+        segments.push(currentSegment); // Push remaining part
 
+        // 3. Process each segment
         repaired = segments.map((seg) => {
-            const isStringSegment = seg.trim().startsWith('"') && seg.trim().endsWith('"');
-            if (!isStringSegment) {
+            // A segment is a String Literal if it starts with "
+            if (seg.startsWith('"')) {
+                // --- STRING SEGMENT HANDLING ---
+                // Escape valid control characters, remove invalid ones
+                return seg.replace(/[\u0000-\u001F]/g, (char) => {
+                    switch (char) {
+                        case '\b': return '\\b';
+                        case '\f': return '\\f';
+                        case '\n': return '\\n';
+                        case '\r': return '\\r';
+                        case '\t': return '\\t';
+                        default: return ''; // Strip illegal controls (0x00, 0x01, etc.)
+                    }
+                });
+            } else {
+                // --- SYNTAX SEGMENT HANDLING ---
                 let fixed = seg;
+                
+                // Safe comment removal: Remove // comments ONLY in syntax segments
+                // Regex: // followed by anything until end of line
+                fixed = fixed.replace(/\/\/.*$/gm, '');
+
+                // Remove all control characters EXCEPT whitespace (Newline, Tab, CR)
+                // 0x00-0x08 (Null to Backspace), 0x0B (Vertical Tab), 0x0C (Form Feed), 0x0E-0x1F (Shift out, etc.)
+                fixed = fixed.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
+                
+                // Fix missing quotes for keys: { key: ... } -> { "key": ... }
                 fixed = fixed.replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":');
+                // Remove trailing commas: , } -> }
                 fixed = fixed.replace(/,(\s*[}\]])/g, '$1');
                 return fixed;
             }
-            return seg;
         }).join('');
+
     } catch (e) {
+        // Fallback for catastrophic regex failure
         repaired = repaired.replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":');
     }
 
+    // 4. Fix truncated JSON (missing closing braces)
     const hasClosingRoot = repaired.endsWith('}');
     const transactionsIndex = repaired.indexOf('"transactions"');
     if (!hasClosingRoot && transactionsIndex !== -1) {
+        // Try to close nicely
         const lastItemEnd = repaired.lastIndexOf('},');
         if (lastItemEnd > transactionsIndex) {
             repaired = repaired.substring(0, lastItemEnd + 1) + ']}';
@@ -98,19 +131,20 @@ const robustJSONRepair = (jsonStr: string): string => {
              }
         }
     }
+    // Final cleanup of trailing commas
     repaired = repaired.replace(/,(\s*[}\]])/g, '$1');
+    
     return repaired;
 };
 
 const cleanAndParseJSON = <T>(text: string | undefined | null): T => {
     if (!text || typeof text !== 'string' || text.trim() === '') {
-        throw new Error("AI trả về dữ liệu rỗng.");
+        throw new Error("AI trả về dữ liệu rỗng. (Có thể do bộ lọc an toàn hoặc lỗi mạng)");
     }
 
     const repairSyntax = (str: string): string => {
         let fixed = str;
         fixed = fixed.replace(/```json/g, "").replace(/```/g, "");
-        fixed = fixed.replace(/\/\/.*$/gm, "");
         return fixed.trim();
     };
 
@@ -119,18 +153,21 @@ const cleanAndParseJSON = <T>(text: string | undefined | null): T => {
     try {
         return JSON.parse(cleaned) as T;
     } catch (e1) {
+        // Try finding the first '{' if there is garbage prefix
         const firstOpen = cleaned.indexOf('{');
         if (firstOpen !== -1) {
             const candidate = cleaned.substring(firstOpen);
             try {
+                // Try parsing the candidate directly first
                 return JSON.parse(candidate) as T;
             } catch (e2) {
-                console.warn("JSON Parse Failed. Attempting repair...");
+                console.warn("JSON Parse Failed. Running robust repair...");
                 const repaired = robustJSONRepair(candidate);
                 try {
                     return JSON.parse(repaired) as T;
                 } catch (e3) {
-                    throw new Error(`Lỗi cấu trúc JSON: ${(e1 as Error).message}`);
+                    // Report the ACTUAL error from the repair attempt, and also the original error
+                    throw new Error(`Lỗi cấu trúc JSON (Sửa thất bại): ${(e3 as Error).message}. (Lỗi gốc: ${(e1 as Error).message})`);
                 }
             }
         }
@@ -145,6 +182,14 @@ interface AIRequestConfig {
     jsonMode: boolean;
     onStatusUpdate?: (model: string, keyIndex: number) => void;
 }
+
+// Cấu hình Safety để tránh bị chặn khi đọc sao kê tài chính
+const SAFETY_SETTINGS_BLOCK_NONE = [
+    { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+    { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+    { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+    { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
+];
 
 const callGoogleAI = async (apiKey: string, model: string, config: AIRequestConfig): Promise<string> => {
     const ai = new GoogleGenAI({ apiKey: apiKey });
@@ -179,6 +224,7 @@ const callGoogleAI = async (apiKey: string, model: string, config: AIRequestConf
             systemInstruction: systemInstruction,
             responseMimeType: config.jsonMode ? "application/json" : "text/plain",
             temperature: 0.1,
+            safetySettings: SAFETY_SETTINGS_BLOCK_NONE, // Quan trọng: Tắt bộ lọc an toàn
         }
     });
 
@@ -199,10 +245,6 @@ const callAIUnified = async (
     let lastError: any = null;
 
     // CHIẾN LƯỢC QUAN TRỌNG: Priority Models -> Priority Keys
-    // 1. [VÒNG 1] Thử Model PRO với Key 1 -> Key N. Nếu Key nào chạy được thì trả về kết quả ngay.
-    // 2. [VÒNG 2] Nếu tất cả các Key với Model PRO đều lỗi (Quota/Server Error), chuyển sang FLASH.
-    // 3. [VÒNG 3] Thử Model FLASH với Key 1 -> Key N.
-    
     const modelsToTry = [PRO_MODEL, FLASH_MODEL];
 
     for (const model of modelsToTry) {
@@ -210,37 +252,49 @@ const callAIUnified = async (
         for (let i = 0; i < keys.length; i++) {
             const currentKey = keys[i];
             
-            // Cập nhật UI: Đang chạy Model nào, Key số mấy
             if (onStatusUpdate) {
                 onStatusUpdate(model, i + 1);
             }
 
             try {
-                // Thử gọi API
                 return await callGoogleAI(currentKey, model, { messages, jsonMode });
             } catch (err: any) {
-                const errorMessage = String(err).toLowerCase();
-                
-                // Mở rộng các loại lỗi có thể "Retry" (Thử lại với Key khác)
-                // Bao gồm: 429 (Quota), 503 (Overloaded), 500 (Internal), Resource Exhausted
-                const isRetryableError = errorMessage.includes('429') || 
-                                     errorMessage.includes('resource exhausted') || 
-                                     errorMessage.includes('too many requests') ||
-                                     errorMessage.includes('503') ||
-                                     errorMessage.includes('500') || 
-                                     errorMessage.includes('internal') ||
-                                     errorMessage.includes('overloaded') ||
-                                     errorMessage.includes('quota');
+                // XỬ LÝ LỖI MẠNH MẼ HƠN (Update v1.6.0)
+                // Chuyển đổi lỗi thành chuỗi để kiểm tra, bao gồm cả trường hợp lỗi là Object JSON
+                let errorMessage = "";
+                try {
+                     errorMessage = String(err).toLowerCase();
+                     if (errorMessage === "[object object]") {
+                         errorMessage = JSON.stringify(err).toLowerCase();
+                     }
+                } catch(e) {
+                    errorMessage = "unknown error";
+                }
+
+                // Danh sách lỗi "Được phép thử lại" (Retryable)
+                const isRetryableError = 
+                     errorMessage.includes('429') || 
+                     errorMessage.includes('resource exhausted') || 
+                     errorMessage.includes('too many requests') ||
+                     errorMessage.includes('503') ||
+                     errorMessage.includes('500') || 
+                     errorMessage.includes('internal') ||
+                     errorMessage.includes('overloaded') ||
+                     errorMessage.includes('quota') ||
+                     errorMessage.includes('xhr error') || // Lỗi mạng client
+                     errorMessage.includes('rpc failed') || // Lỗi gRPC
+                     errorMessage.includes('fetch failed'); // Lỗi fetch
                 
                 lastError = err;
 
                 if (isRetryableError) {
-                    console.warn(`⚠️ Model [${model}] Key [${i + 1}] gặp lỗi Retryable (Quota/Server). Đang thử Key tiếp theo...`);
-                    // Continue vòng lặp inner để thử Key tiếp theo (i++)
+                    console.warn(`⚠️ Model [${model}] Key [${i + 1}] gặp lỗi Retryable (Quota/Network). Đang thử Key tiếp theo sau 2s... Lỗi: ${errorMessage.substring(0, 100)}...`);
+                    // Thêm delay để mạng ổn định lại trước khi thử key mới
+                    await delay(2000);
                     continue; 
                 } else {
-                    // Nếu lỗi nghiêm trọng (ví dụ 400 Bad Request do sai format input), throw ngay lập tức
                     console.error(`Lỗi Critical (${model}):`, err);
+                    // Nếu lỗi nghiêm trọng (400, 401...), dừng ngay lập tức
                     throw err; 
                 }
             }
@@ -249,12 +303,11 @@ const callAIUnified = async (
         console.warn(`⚠️ Đã thử TẤT CẢ Key với Model [${model}] nhưng đều thất bại. Đang chuyển sang Model dự phòng (nếu còn)...`);
     }
 
-    throw new Error(`Tất cả các Key & Model đều thất bại. Vui lòng thử lại sau giây lát. Lỗi cuối cùng: ${lastError?.message}`);
+    throw new Error(`Tất cả các Key & Model đều thất bại. Vui lòng thử lại sau giây lát. Lỗi cuối cùng: ${lastError?.message || JSON.stringify(lastError)}`);
 };
 
 /**
- * OCR: Sử dụng Gemini Flash (Luôn dùng Flash cho nhanh và rẻ vì OCR cần xử lý ảnh)
- * Cũng áp dụng Key Rotation cho OCR
+ * OCR: Sử dụng Gemini Flash
  */
 export const extractTextFromContent = async (content: { images: { mimeType: string; data: string }[] }): Promise<string> => {
     if (content.images.length === 0) return '';
@@ -263,7 +316,6 @@ export const extractTextFromContent = async (content: { images: { mimeType: stri
     const keys = getAPIKeys();
     if (keys.length === 0) throw new Error("Chưa có API Key cho OCR.");
 
-    // Simple Rotation for OCR (Just try keys one by one with Flash)
     for (const key of keys) {
         try {
             const ai = new GoogleGenAI({ apiKey: key });
@@ -272,14 +324,19 @@ export const extractTextFromContent = async (content: { images: { mimeType: stri
             const response = await ai.models.generateContent({
                 model: FLASH_MODEL,
                 contents: { parts: [{ text: prompt }, ...imageParts] },
-                config: { temperature: 0 }
+                config: { 
+                    temperature: 0,
+                    safetySettings: SAFETY_SETTINGS_BLOCK_NONE // Quan trọng: Tắt bộ lọc an toàn cho OCR
+                }
             });
             return (response.text || '').trim();
         } catch (e: any) {
+             // Retry cho OCR đơn giản hơn
              if (String(e).includes('429') || String(e).includes('503')) {
-                 continue; // Try next key
+                 await delay(1000);
+                 continue;
              }
-             throw e; // Real error
+             throw e;
         }
     }
     throw new Error("Không thể đọc ảnh (OCR) do tất cả Key đều bận.");
@@ -298,6 +355,7 @@ export const processStatement = async (
 
     ### 1. QUY TẮC AN TOÀN JSON (QUAN TRỌNG):
     - **Description Cleaning**: Trong trường "description", NẾU có dấu ngoặc kép (") bên trong nội dung, HÃY THAY THẾ bằng dấu nháy đơn (') hoặc xóa bỏ.
+    - **Control Characters**: Tuyệt đối ESCAPE các ký tự xuống dòng (\\n), tab (\\t) bên trong chuỗi giá trị. Ví dụ: "Dòng 1\\nDòng 2". KHÔNG ĐƯỢC để xuống dòng thực tế (Literal Newline).
     - Không output Markdown (\`\`\`json). Chỉ trả về Raw JSON.
 
     ### 2. MAPPING KẾ TOÁN (NGUYÊN TẮC ĐẢO):
@@ -323,7 +381,7 @@ export const processStatement = async (
             { 
                 "transactionCode": "string", 
                 "date": "DD/MM/YYYY", 
-                "description": "string (Đã sanitize)", 
+                "description": "string (Đã sanitize, escape newline)", 
                 "debit": number (Tiền vào/Tăng), 
                 "credit": number (Tiền ra/Giảm - Đây là số tiền gốc giao dịch), 
                 "fee": number (Luôn là 0 trừ khi có cột riêng), 
@@ -469,12 +527,6 @@ export const chatWithAI = async (message: string, currentReport: GeminiResponse,
     `;
 
     const formattedHistory = chatHistory.map(msg => ({ role: msg.role === 'model' ? 'assistant' : 'user', content: msg.content }));
-    
-    // Nếu có ảnh, ta thêm mô tả vào content user (Lưu ý: hàm callAIUnified hiện tại chỉ support text messages để đơn giản hóa rotation logic
-    // Để support image tốt nhất trong rotation, ta cần sửa callAIUnified để nhận "parts" thay vì string content.
-    // Tuy nhiên, ở mức độ simple, ta sẽ báo user nếu dùng ảnh mà model không hỗ trợ, hoặc OCR trước).
-    // Nhưng Gemini Pro/Flash đều hỗ trợ ảnh.
-    // Tạm thời: Nếu có ảnh, ta OCR ảnh đó trước rồi gửi text vào chat context, để đảm bảo tính nhất quán.
     
     let userContent = message;
     if (image) {
