@@ -350,31 +350,28 @@ export const processStatement = async (
     isPartial: boolean = false,
     onStatusUpdate?: (model: string, keyIndex: number) => void
 ): Promise<GeminiResponse> => {
-    // --- UPDATED SYSTEM PROMPT (v1.6.1) ---
-    const systemPrompt = `Bạn là Chuyên gia Xử lý Dữ liệu Kế toán (Google Gemini AI).
-    Nhiệm vụ: Chuyển đổi văn bản sao kê ngân hàng thành JSON chuẩn RFC 8259.
+    // --- UPDATED SYSTEM PROMPT (v1.6.4 - Kỷ luật thép) ---
+    const systemPrompt = `Bạn là Chuyên gia Xử lý Dữ liệu Kế toán Ngân hàng (Google Gemini AI).
+    Nhiệm vụ: Chuyển đổi văn bản sao kê ngân hàng thành JSON chuẩn.
 
-    ### 1. QUY TẮC CỐT LÕI (CHỐNG ẢO GIÁC & TĂNG DÒNG):
-    - **1 GIAO DỊCH = 1 DÒNG CÓ TIỀN + NGÀY**: Chỉ coi là một giao dịch khi dòng đó có đầy đủ **Ngày tháng (Date)** VÀ **Số tiền biến động (Debit/Credit)**.
-    - **XỬ LÝ ĐA DÒNG (MULTI-LINE DESCRIPTION)**: 
-      + Nếu một dòng CHỈ CÓ CHỮ (Mô tả) mà KHÔNG có Ngày/Số tiền, đó là nội dung bị xuống dòng của giao dịch phía trên.
-      + HÀNH ĐỘNG: Gộp nội dung dòng đó vào trường "description" của giao dịch ngay trước đó. **TUYỆT ĐỐI KHÔNG TẠO GIAO DỊCH MỚI**.
-    - **BỎ QUA TIÊU ĐỀ LẶP LẠI**: Trong văn bản dài, tiêu đề cột (như "Ngày", "Số dư", "Diễn giải", "Debit", "Credit", "Trang...") thường lặp lại. Hãy **BỎ QUA** chúng, không được coi là dữ liệu.
-    - **Số lượng**: Không được tự ý sinh thêm dòng dữ liệu không có trong văn bản gốc.
+    ### 1. QUY TẮC BẤT DI BẤT DỊCH VỀ SỐ LƯỢNG DÒNG (CHỐNG ẢO GIÁC):
+    - **QUAN TRỌNG NHẤT:** Tuyệt đối KHÔNG tách 1 dòng giao dịch sao kê thành nhiều dòng JSON.
+    - **GỘP DÒNG:** Nếu một dòng chỉ chứa Chữ (Diễn giải) mà KHÔNG có Số tiền và Ngày tháng -> Đó là phần mô tả bị xuống dòng của giao dịch phía trên. Hãy gộp nó vào "description" của giao dịch trước đó.
+    - **LOẠI BỎ RÁC:** Các dòng tiêu đề lặp lại (Ngày, Số dư, Debit, Credit...), dòng tổng cộng trang, dòng số dư chuyển sang trang sau -> **BỎ QUA, KHÔNG XUẤT RA JSON**.
 
-    ### 2. SỐ DƯ (QUAN TRỌNG ĐỂ ĐỐI CHIẾU):
-    - **openingBalance**: Tìm "Số dư đầu kỳ" hoặc số dư dòng đầu tiên.
-    - **endingBalance**: Tìm "Số dư cuối kỳ" hoặc số dư tại dòng giao dịch cuối cùng trong văn bản. Nếu không thấy ghi rõ, hãy lấy số dư lũy kế tại dòng cuối cùng.
+    ### 2. QUY TẮC ĐỊNH KHOẢN (NGƯỢC CHIỀU NGÂN HÀNG):
+    - Sao kê ghi "Báo Nợ" hoặc "Debit" hoặc nằm ở cột Ghi Nợ 
+      => Là tiền RA khỏi tài khoản 
+      => Kế toán ghi CÓ. Gán vào JSON field **'credit'**.
+    - Sao kê ghi "Báo Có" hoặc "Credit" hoặc nằm ở cột Ghi Có 
+      => Là tiền VÀO tài khoản 
+      => Kế toán ghi NỢ. Gán vào JSON field **'debit'**.
+      
+    ### 3. QUY TẮC DỮ LIỆU SỐ:
+    - Một giao dịch hợp lệ BẮT BUỘC phải có số tiền > 0 ở cột debit HOẶC credit. Nếu cả 2 đều bằng 0, đó KHÔNG phải giao dịch (có thể là dòng ghi chú).
+    - Không tự ý điền số 0 hoặc bịa ngày tháng cho các dòng text lẻ loi.
 
-    ### 3. MAPPING KẾ TOÁN (NGUYÊN TẮC ĐẢO):
-    - **Ghi Nợ (Debit)** trên sao kê = **TIỀN RA** (Doanh nghiệp giảm) -> Gán vào JSON **'credit'**.
-    - **Ghi Có (Credit)** trên sao kê = **TIỀN VÀO** (Doanh nghiệp tăng) -> Gán vào JSON **'debit'**.
-
-    ### 4. QUY TẮC "ĐƠN NHẤT" CHO DỮ LIỆU SỐ:
-    - **MỘT SỐ TIỀN CHỈ XUẤT HIỆN 1 LẦN DUY NHẤT**: Không bao giờ được copy/nhân bản số tiền từ cột này sang cột khác.
-    - **KHI NÀO MỚI DÙNG TRƯỜNG 'fee' / 'vat'?**: Chỉ khi có cột vật lý riêng biệt. Nếu không, gộp hết vào 'credit'/'debit'. Mặc định 'fee' = 0, 'vat' = 0.
-
-    ### 5. CẤU TRÚC JSON OUTPUT:
+    ### 4. CẤU TRÚC JSON OUTPUT:
     {
         "openingBalance": number, 
         "endingBalance": number,
@@ -383,9 +380,9 @@ export const processStatement = async (
             { 
                 "transactionCode": "string", 
                 "date": "DD/MM/YYYY", 
-                "description": "string (Đã sanitize, gộp dòng text lẻ loi)", 
-                "debit": number (Tiền vào/Tăng), 
-                "credit": number (Tiền ra/Giảm), 
+                "description": "string (Đã gộp dòng text lẻ)", 
+                "debit": number (Tiền vào TK / Ngân hàng Báo Có), 
+                "credit": number (Tiền ra TK / Ngân hàng Báo Nợ), 
                 "fee": number, 
                 "vat": number 
             }
@@ -471,8 +468,11 @@ export const processBatchData = async (
                     !tx.description.toLowerCase().includes("số dư đầu kỳ") &&
                     !tx.description.toLowerCase().includes("cộng phát sinh") &&
                     !tx.description.toLowerCase().includes("chuyển sang trang") && // Lọc dòng phân trang
-                    // Kiểm tra kỹ hơn: Phải có ít nhất 1 loại tiền > 0 HOẶC có mã GD
-                    (tx.debit > 0 || tx.credit > 0 || (tx.transactionCode && tx.transactionCode.length > 2))
+                    !tx.description.toLowerCase().includes("mang sang trang") &&
+                    !tx.description.toLowerCase().includes("số dư cuối") &&
+                    // STRICT FILTER: Phải có tiền > 0 mới là giao dịch. 
+                    // Nếu cả Debit và Credit đều = 0 -> Rác
+                    (tx.debit > 0 || tx.credit > 0)
                 );
                 combinedTransactions = [...combinedTransactions, ...validTransactions];
             }
