@@ -10,15 +10,16 @@ import { CURRENT_VERSION } from './utils/version';
 
 type LoadingState = 'idle' | 'extracting' | 'processing';
 type UploadState = 'idle' | 'uploading' | 'completed';
-type ChunkStrategy = 'ALL' | '1000' | '500' | '200' | '100';
+// Cập nhật các mức chia nhỏ theo yêu cầu: 30, 50, 100, 200, ALL
+type ChunkStrategy = 'ALL' | '200' | '100' | '50' | '30';
 
 export default function App() {
     const [openingBalance, setOpeningBalance] = useState('');
     const [chunks, setChunks] = useState<ProcessedChunk[]>([]);
     
-    // Config chia nhỏ
-    const [chunkStrategy, setChunkStrategy] = useState<ChunkStrategy>('500');
-    const [recommendedStrategy, setRecommendedStrategy] = useState<ChunkStrategy>('500');
+    // Config chia nhỏ - Mặc định là 50 dòng cho an toàn
+    const [chunkStrategy, setChunkStrategy] = useState<ChunkStrategy>('50');
+    const [recommendedStrategy, setRecommendedStrategy] = useState<ChunkStrategy>('50');
 
     const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
     const [uploadState, setUploadState] = useState<UploadState>('idle');
@@ -145,13 +146,15 @@ export default function App() {
                 }
             }
 
-            // 2. Logic đề xuất chiến lược
+            // 2. Logic đề xuất chiến lược (Cập nhật theo các mức mới)
             const totalLines = allLines.length;
-            let suggestion: ChunkStrategy = '500';
+            let suggestion: ChunkStrategy = '50';
             
             if (totalLines > 3000) suggestion = '200';
-            else if (totalLines > 1000) suggestion = '500';
-            else if (totalLines > 0 && totalLines < 300) suggestion = 'ALL'; 
+            else if (totalLines > 1000) suggestion = '100';
+            else if (totalLines > 500) suggestion = '50';
+            else if (totalLines > 0 && totalLines <= 300) suggestion = 'ALL'; 
+            else if (totalLines > 0) suggestion = '30'; // Dự phòng cho file rất phức tạp
             
             setRecommendedStrategy(suggestion);
             setChunkStrategy(suggestion); 
@@ -160,7 +163,7 @@ export default function App() {
             let finalChunks: ProcessedChunk[] = [...imageChunks];
             
             if (allLines.length > 0) {
-                let chunkSize = 500;
+                let chunkSize = 50;
                 if (chunkStrategy === 'ALL') {
                     chunkSize = Math.max(1, allLines.length);
                 } else {
@@ -455,10 +458,10 @@ export default function App() {
                                 <div className="flex flex-col gap-2 mb-3">
                                     <span className="text-xs text-gray-500">AI sẽ tự động đề xuất cách chia nhỏ dựa trên dung lượng file.</span>
                                     <select value={chunkStrategy} onChange={(e) => setChunkStrategy(e.target.value as ChunkStrategy)} className="block w-full px-3 py-2 text-sm bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md focus:ring-indigo-500" disabled={loadingState === 'extracting'}>
-                                        <option value="500">500 dòng/phần {recommendedStrategy === '500' ? '(Khuyên dùng)' : ''}</option>
+                                        <option value="30">30 dòng/phần {recommendedStrategy === '30' ? '(Khuyên dùng - Rất chi tiết)' : ''}</option>
+                                        <option value="50">50 dòng/phần {recommendedStrategy === '50' ? '(Khuyên dùng - Chi tiết)' : ''}</option>
+                                        <option value="100">100 dòng/phần {recommendedStrategy === '100' ? '(Khuyên dùng)' : ''}</option>
                                         <option value="200">200 dòng/phần {recommendedStrategy === '200' ? '(Khuyên dùng - File lớn)' : ''}</option>
-                                        <option value="100">100 dòng/phần</option>
-                                        <option value="1000">1000 dòng/phần</option>
                                         <option value="ALL">Gửi toàn bộ {recommendedStrategy === 'ALL' ? '(Khuyên dùng - File nhỏ)' : ''}</option>
                                     </select>
                                 </div>
