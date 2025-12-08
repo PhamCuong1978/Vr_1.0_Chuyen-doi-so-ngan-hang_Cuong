@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, HarmCategory, HarmBlockThreshold } from "@google/genai";
 import type { GeminiResponse, AIChatResponse, ChatMessage, Transaction } from '../types';
 
 // --- CONFIGURATION ---
@@ -185,10 +185,10 @@ interface AIRequestConfig {
 
 // Cấu hình Safety để tránh bị chặn khi đọc sao kê tài chính
 const SAFETY_SETTINGS_BLOCK_NONE = [
-    { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-    { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-    { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-    { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
+    { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+    { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+    { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+    { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
 ];
 
 const callGoogleAI = async (apiKey: string, model: string, config: AIRequestConfig): Promise<string> => {
@@ -256,46 +256,59 @@ const callAIUnified = async (
                 onStatusUpdate(model, i + 1);
             }
 
-            try {
-                return await callGoogleAI(currentKey, model, { messages, jsonMode });
-            } catch (err: any) {
-                // XỬ LÝ LỖI MẠNH MẼ HƠN (Update v1.6.0)
-                // Chuyển đổi lỗi thành chuỗi để kiểm tra, bao gồm cả trường hợp lỗi là Object JSON
-                let errorMessage = "";
+            // Retry Mechanism for SINGLE Key (v1.7.1)
+            // Nếu lỗi là Network/XHR/RPC (những lỗi tạm thời), thử lại key này vài lần trước khi bỏ qua.
+            let keyAttempts = 0;
+            const MAX_KEY_ATTEMPTS = 3; 
+
+            while (keyAttempts < MAX_KEY_ATTEMPTS) {
                 try {
-                     errorMessage = String(err).toLowerCase();
-                     if (errorMessage === "[object object]") {
-                         errorMessage = JSON.stringify(err).toLowerCase();
-                     }
-                } catch(e) {
-                    errorMessage = "unknown error";
-                }
+                    return await callGoogleAI(currentKey, model, { messages, jsonMode });
+                } catch (err: any) {
+                    keyAttempts++;
+                    
+                    let errorMessage = "";
+                    try {
+                        errorMessage = String(err).toLowerCase();
+                        if (errorMessage === "[object object]") {
+                            errorMessage = JSON.stringify(err).toLowerCase();
+                        }
+                    } catch(e) { errorMessage = "unknown error"; }
 
-                // Danh sách lỗi "Được phép thử lại" (Retryable)
-                const isRetryableError = 
-                     errorMessage.includes('429') || 
-                     errorMessage.includes('resource exhausted') || 
-                     errorMessage.includes('too many requests') ||
-                     errorMessage.includes('503') ||
-                     errorMessage.includes('500') || 
-                     errorMessage.includes('internal') ||
-                     errorMessage.includes('overloaded') ||
-                     errorMessage.includes('quota') ||
-                     errorMessage.includes('xhr error') || // Lỗi mạng client
-                     errorMessage.includes('rpc failed') || // Lỗi gRPC
-                     errorMessage.includes('fetch failed'); // Lỗi fetch
-                
-                lastError = err;
+                    lastError = err;
 
-                if (isRetryableError) {
-                    console.warn(`⚠️ Model [${model}] Key [${i + 1}] gặp lỗi Retryable (Quota/Network). Đang thử Key tiếp theo sau 2s... Lỗi: ${errorMessage.substring(0, 100)}...`);
-                    // Thêm delay để mạng ổn định lại trước khi thử key mới
-                    await delay(2000);
-                    continue; 
-                } else {
-                    console.error(`Lỗi Critical (${model}):`, err);
-                    // Nếu lỗi nghiêm trọng (400, 401...), dừng ngay lập tức
-                    throw err; 
+                    // Phân loại lỗi
+                    const isNetworkError = 
+                        errorMessage.includes('xhr error') || 
+                        errorMessage.includes('rpc failed') ||
+                        errorMessage.includes('fetch failed') ||
+                        errorMessage.includes('network error') ||
+                        errorMessage.includes('503') || 
+                        errorMessage.includes('500'); 
+
+                    const isQuotaError = 
+                        errorMessage.includes('429') || 
+                        errorMessage.includes('resource exhausted') || 
+                        errorMessage.includes('too many requests') || 
+                        errorMessage.includes('quota');
+
+                    // 1. Nếu lỗi Mạng (XHR/RPC): Thử lại key này (Exponential Backoff)
+                    if (isNetworkError && keyAttempts < MAX_KEY_ATTEMPTS) {
+                         const waitTime = 2000 * keyAttempts;
+                         console.warn(`⚠️ Model [${model}] Key [${i + 1}] Network Error (Lần ${keyAttempts}/${MAX_KEY_ATTEMPTS}). Đang thử lại sau ${waitTime}ms... Lỗi: ${errorMessage.substring(0, 100)}...`);
+                         await delay(waitTime);
+                         continue; // Thử lại vòng while
+                    }
+
+                    // 2. Nếu lỗi Quota hoặc đã hết số lần thử lại mạng: Dừng vòng while để chuyển sang KEY kế tiếp
+                    if (isQuotaError) {
+                        console.warn(`⚠️ Model [${model}] Key [${i + 1}] Hết hạn mức (Quota). Đang chuyển Key...`);
+                    } else if (keyAttempts >= MAX_KEY_ATTEMPTS) {
+                        console.warn(`⚠️ Model [${model}] Key [${i + 1}] Thất bại sau ${MAX_KEY_ATTEMPTS} lần thử. Đang chuyển Key...`);
+                    }
+
+                    // Thoát vòng lặp Retry của Key này -> Chuyển sang Key tiếp theo trong vòng lặp 'for'
+                    break;
                 }
             }
         }
@@ -332,7 +345,7 @@ export const extractTextFromContent = async (content: { images: { mimeType: stri
             return (response.text || '').trim();
         } catch (e: any) {
              // Retry cho OCR đơn giản hơn
-             if (String(e).includes('429') || String(e).includes('503')) {
+             if (String(e).includes('429') || String(e).includes('503') || String(e).toLowerCase().includes('xhr')) {
                  await delay(1000);
                  continue;
              }
@@ -350,41 +363,46 @@ export const processStatement = async (
     isPartial: boolean = false,
     onStatusUpdate?: (model: string, keyIndex: number) => void
 ): Promise<GeminiResponse> => {
-    // --- UPDATED SYSTEM PROMPT (v1.6.9 - Strict Consistency Rule) ---
+    // --- UPDATED SYSTEM PROMPT (v1.8.0 - HARD RULES FOR MAPPING) ---
     const systemPrompt = `Bạn là Chuyên gia Xử lý Dữ liệu Kế toán Ngân hàng (Google Gemini AI).
     Nhiệm vụ: Chuyển đổi văn bản sao kê ngân hàng thành JSON chuẩn.
 
-    ### 1. QUY TẮC BẤT DI BẤT DỊCH VỀ SỐ LƯỢNG DÒNG (CHỐNG ẢO GIÁC & TRÙNG LẶP):
-    - **CẢNH BÁO QUAN TRỌNG:** Nếu văn bản có phần "HEADER CONTEXT", đó chỉ là thông tin tiêu đề để tham khảo. **TUYỆT ĐỐI KHÔNG** trích xuất lại các giao dịch nằm trong phần HEADER CONTEXT vào kết quả JSON, vì chúng đã được xử lý ở phần trước rồi. Chỉ trích xuất dữ liệu trong phần BODY.
-    - **KHÔNG TÁCH DÒNG:** Tuyệt đối KHÔNG tách 1 dòng giao dịch sao kê thành nhiều dòng JSON.
-    - **GỘP DÒNG:** Nếu một dòng chỉ chứa Chữ (Diễn giải) mà KHÔNG có Số tiền và Ngày tháng -> Đó là phần mô tả bị xuống dòng của giao dịch phía trên. Hãy gộp nó vào "description" của giao dịch trước đó.
-    - **LOẠI BỎ RÁC:** Các dòng tiêu đề lặp lại (Ngày, Số dư, Debit, Credit...), dòng tổng cộng trang, dòng số dư chuyển sang trang sau -> **BỎ QUA, KHÔNG XUẤT RA JSON**.
+    ### 1. QUY TẮC BẤT DI BẤT DỊCH VỀ CẤU TRÚC (CHỐNG ẢO GIÁC & TRÙNG LẶP):
+    - Nếu văn bản có phần "HEADER CONTEXT", đó chỉ là thông tin tiêu đề. KHÔNG trích xuất lại các giao dịch trong đó. Chỉ trích xuất phần BODY.
+    - KHÔNG tách 1 dòng giao dịch sao kê thành nhiều dòng JSON.
+    - Loại bỏ các dòng tiêu đề lặp lại hoặc số dư đầu/cuối trang.
 
-    ### 2. QUY TẮC ĐỊNH KHOẢN (NGƯỢC CHIỀU NGÂN HÀNG):
-    - **Cột "Ghi Nợ" (Debit) / "Rút" / "Chi"** => JSON: **'credit'** (Tiền RA).
-    - **Cột "Ghi Có" (Credit) / "Nộp" / "Thu"** => JSON: **'debit'** (Tiền VÀO).
+    ### 2. QUY TẮC ĐỊNH KHOẢN (NGUYÊN TẮC VÀNG - BẮT BUỘC TUÂN THỦ 100%):
+    Đây là quá trình chuyển đổi từ **SỔ PHỤ NGÂN HÀNG** sang **SỔ CÁI KẾ TOÁN**. Các cột sẽ bị ĐẢO NGƯỢC.
+    
+    - **INPUT:** Cột "Ghi Nợ" / "Debit" / "Rút" / "Chi" trên File ảnh/PDF.
+      -> **OUTPUT JSON:** field **'credit'** (Phát Sinh CÓ - Tiền RA).
+      
+    - **INPUT:** Cột "Ghi Có" / "Credit" / "Nộp" / "Thu" trên File ảnh/PDF.
+      -> **OUTPUT JSON:** field **'debit'** (Phát Sinh NỢ - Tiền VÀO).
 
-    ### 3. QUY TẮC TÁCH PHÍ & VAT (QUAN TRỌNG NHẤT - STRICT):
-    - Mục tiêu: Thống nhất số liệu. Tổng tiền giao dịch = (credit/debit) + fee + vat.
-    - **NẾU** bạn tìm thấy Phí (fee) hoặc VAT trong nội dung giao dịch:
-      => **BẮT BUỘC PHẢI TRỪ ĐI** số tiền phí/VAT đó khỏi số tiền gốc (debit/credit).
-      => Ví dụ: Giao dịch ghi "Tổng nợ: 110.000 (đã bao gồm 10.000 phí)".
-         -> JSON OUTPUT: { "credit": 100000, "fee": 10000, "vat": 0 }
-         -> TUYỆT ĐỐI KHÔNG ĐƯỢC ĐỂ: { "credit": 110000, "fee": 10000 } (Vì như vậy khi cộng lại sẽ thành 120.000 -> Sai).
-    - **NẾU** không tách được: Để fee=0, vat=0 và điền toàn bộ số tiền vào debit/credit.
+    **CẢNH BÁO QUAN TRỌNG (NGHIÊM CẤM SUY DIỄN):**
+    - **TUYỆT ĐỐI KHÔNG** được đọc nội dung Diễn giải (Description) để tự ý phân loại Nợ/Có.
+    - **VÍ DỤ CẤM:** Dù nội dung ghi là "Thu lãi", "Hoàn tiền", "Nhận lương"... nhưng nếu con số nằm ở cột **DEBIT** của file Bank -> Bắt buộc phải đưa vào field **'credit'** (Tiền ra).
+    - **VÍ DỤ CẤM:** Dù nội dung ghi là "Trả nợ", "Chi phí"... nhưng nếu con số nằm ở cột **CREDIT** của file Bank -> Bắt buộc phải đưa vào field **'debit'** (Tiền vào).
+    - **HÃY TIN TƯỞNG TUYỆT ĐỐI VÀO CẤU TRÚC CỘT.** Đừng cố gắng "thông minh" hơn dữ liệu gốc.
+
+    ### 3. QUY TẮC PHÍ & VAT:
+    - Nếu tìm thấy thông tin Phí/VAT trong nội dung diễn giải, hãy trích xuất vào field "fee" và "vat".
+    - Số tiền hiển thị trên cột của Bank là số TỔNG (Gross). Hãy trích xuất y nguyên số đó vào debit/credit.
 
     ### 4. CẤU TRÚC JSON OUTPUT:
     {
         "openingBalance": number, 
         "endingBalance": number,
-        "accountInfo": { "accountName": "string", "accountNumber": "string", "bankName": "string", "branch": "string" },
+        "accountInfo": { ... },
         "transactions": [
             { 
                 "transactionCode": "string", 
                 "date": "DD/MM/YYYY", 
-                "description": "string (Đã gộp dòng text lẻ)", 
-                "debit": number (Tiền VÀO TK. Chỉ điền phần GỐC nếu có tách phí), 
-                "credit": number (Tiền RA TK. Chỉ điền phần GỐC nếu có tách phí), 
+                "description": "string", 
+                "debit": number (Lấy từ cột Credit/Thu của Bank), 
+                "credit": number (Lấy từ cột Debit/Chi của Bank), 
                 "fee": number, 
                 "vat": number 
             }

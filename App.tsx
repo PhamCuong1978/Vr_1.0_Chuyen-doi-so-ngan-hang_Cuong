@@ -111,20 +111,20 @@ export default function App() {
             return;
         }
 
-        const headers = ["Phần", "Mã GD", "Ngày", "Nội dung", "PS Nợ", "PS Có (Tổng)", "Số tiền GD (Gốc)", "Phí", "VAT"];
+        const headers = ["Phần", "Mã GD", "Ngày", "Nội dung", "PS Nợ (Vào)", "PS Có (Tổng)", "Số tiền GD (Gốc)", "Phí", "VAT"];
         const rows = [headers.join(',')];
 
         completedChunks.forEach(chunk => {
             chunk.result?.transactions.forEach(tx => {
-                const calculatedCredit = tx.credit + (tx.fee || 0) + (tx.vat || 0);
+                const netCredit = tx.credit - (tx.fee || 0) - (tx.vat || 0);
                 const row = [
                     `"Phần ${chunk.index}"`,
                     `"${tx.transactionCode || ''}"`,
                     `"${tx.date}"`,
                     `"${tx.description.replace(/"/g, '""')}"`,
                     tx.debit,
-                    calculatedCredit,
-                    tx.credit,
+                    tx.credit, // Total (Raw)
+                    netCredit, // Net (Calculated)
                     tx.fee || 0,
                     tx.vat || 0
                 ];
@@ -473,6 +473,7 @@ export default function App() {
             return parseDate(a.date) - parseDate(b.date);
         });
 
+        // TÍNH TOÁN LẠI TỔNG (Logic mới: Credit/Debit là số Tổng)
         const { totalDebit, totalCredit, totalFee, totalVat } = allTransactions.reduce((acc, tx) => ({
              totalDebit: acc.totalDebit + tx.debit,
              totalCredit: acc.totalCredit + tx.credit,
@@ -481,7 +482,9 @@ export default function App() {
         }), { totalDebit: 0, totalCredit: 0, totalFee: 0, totalVat: 0 });
 
         // --- 5. Tính toán & Đối chiếu ---
-        const calculatedEnding = globalOpening + totalDebit - totalCredit - totalFee - totalVat;
+        // Số dư = Đầu kỳ + Tổng Vào (Debit) - Tổng Ra (Credit)
+        // Vì Debit/Credit giờ là số Tổng, nên trừ thẳng, không cần cộng Fee/VAT vào nữa
+        const calculatedEnding = globalOpening + totalDebit - totalCredit;
         const diff = Math.abs(calculatedEnding - detectedEnding);
         
         if (diff > 100 && detectedEnding !== 0) {
@@ -536,7 +539,7 @@ export default function App() {
             <div className="max-w-7xl mx-auto">
                 <header className="text-center mb-8">
                     <h1 className="text-3xl sm:text-4xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-blue-500 to-teal-400">
-                        Chuyển Đổi Sổ Phụ Ngân Hàng (Gemini Pro)
+                        Vr_1.0: Chuyển Đổi Số Ngân Hàng (Cuong)
                     </h1>
                     <p className="mt-2 text-gray-600 dark:text-gray-400 flex items-center justify-center gap-2">
                         <span>Xử lý Big Data (Chia nhỏ & Gộp). Powered by Gemini.</span>
