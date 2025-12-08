@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { processStatement, extractTextFromContent } from './services/geminiService';
 import type { Transaction, GeminiResponse, ProcessedChunk } from './types';
-import { UploadIcon, ProcessIcon } from './components/Icons';
+import { UploadIcon, ProcessIcon, DownloadIcon, CopyIcon } from './components/Icons';
 import ChatAssistant from './components/ChatAssistant';
 import ResultTable from './components/ResultTable';
 import { extractFromFile } from './utils/fileHelper';
@@ -39,7 +39,7 @@ export default function App() {
     const isLoading = loadingState !== 'idle';
     
     useEffect(() => {
-        console.log(`App Version ${CURRENT_VERSION} Loaded - No Data Loss Edition`);
+        console.log(`App Version ${CURRENT_VERSION} Loaded - Batch Download Edition`);
         return () => {
             if (uploadInterval.current) clearInterval(uploadInterval.current);
         };
@@ -101,6 +101,76 @@ export default function App() {
         setUploadProgress(0);
         resetState();
         setOpeningBalance('');
+    };
+
+    // --- BATCH DOWNLOAD & COPY HANDLERS ---
+    const handleBatchDownload = () => {
+        const completedChunks = chunks.filter(c => c.status === 'completed' && c.result).sort((a, b) => a.index - b.index);
+        if (completedChunks.length === 0) {
+            alert("Chưa có dữ liệu để tải xuống.");
+            return;
+        }
+
+        const headers = ["Phần", "Mã GD", "Ngày", "Nội dung", "PS Nợ", "PS Có (Tổng)", "Số tiền GD (Gốc)", "Phí", "VAT"];
+        const rows = [headers.join(',')];
+
+        completedChunks.forEach(chunk => {
+            chunk.result?.transactions.forEach(tx => {
+                const calculatedCredit = tx.credit + (tx.fee || 0) + (tx.vat || 0);
+                const row = [
+                    `"Phần ${chunk.index}"`,
+                    `"${tx.transactionCode || ''}"`,
+                    `"${tx.date}"`,
+                    `"${tx.description.replace(/"/g, '""')}"`,
+                    tx.debit,
+                    calculatedCredit,
+                    tx.credit,
+                    tx.fee || 0,
+                    tx.vat || 0
+                ];
+                rows.push(row.join(','));
+            });
+        });
+
+        const csvContent = "data:text/csv;charset=utf-8," + rows.join('\n');
+        const encodedUri = encodeURI(csvContent);
+        const link = document.createElement("a");
+        link.setAttribute("href", encodedUri);
+        link.setAttribute("download", `ket_qua_tung_phan_v${CURRENT_VERSION}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    };
+
+    const handleBatchCopy = () => {
+        const completedChunks = chunks.filter(c => c.status === 'completed' && c.result).sort((a, b) => a.index - b.index);
+        if (completedChunks.length === 0) {
+             alert("Chưa có dữ liệu để copy.");
+             return;
+        }
+
+        const headers = ["Phần", "Mã GD", "Ngày", "Mô tả", "Nợ", "Có", "Phí", "VAT"];
+        let tsvContent = headers.join('\t') + '\n';
+
+        completedChunks.forEach(chunk => {
+             chunk.result?.transactions.forEach(tx => {
+                 const row = [
+                    `Phần ${chunk.index}`,
+                    tx.transactionCode,
+                    tx.date,
+                    tx.description.replace(/\t/g, ' '), // sanitize tabs
+                    tx.debit,
+                    tx.credit,
+                    tx.fee || 0,
+                    tx.vat || 0
+                ];
+                tsvContent += row.join('\t') + '\n';
+             });
+        });
+
+        navigator.clipboard.writeText(tsvContent).then(() => {
+            alert("Đã copy toàn bộ dữ liệu (từng phần) vào Clipboard!");
+        });
     };
 
     // --- EXTRACTION LOGIC ---
@@ -590,13 +660,31 @@ export default function App() {
                     <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg min-h-[500px] flex flex-col">
                         <div className="flex justify-between items-center mb-4 flex-wrap gap-2">
                             <h2 className="text-2xl font-bold text-gray-800 dark:text-gray-200">KẾT QUẢ</h2>
-                            <div className="space-x-2">
-                                <button onClick={() => setIsMergedView(false)} className={`px-3 py-1 text-sm rounded-md transition-colors ${!isMergedView ? 'bg-indigo-100 text-indigo-700 font-bold' : 'text-gray-500 hover:bg-gray-100'}`}>
-                                    Từng phần
-                                </button>
-                                <button onClick={handleMergeResults} className={`px-3 py-1 text-sm rounded-md transition-colors ${isMergedView ? 'bg-indigo-100 text-indigo-700 font-bold' : 'text-gray-500 hover:bg-gray-100'}`}>
-                                    Gộp & Đối chiếu
-                                </button>
+                            
+                            {/* ACTIONS GROUP */}
+                            <div className="flex items-center gap-3">
+                                
+                                {/* Nút Batch Download/Copy - Chỉ hiện khi chưa gộp và có dữ liệu */}
+                                {!isMergedView && chunks.some(c => c.status === 'completed') && (
+                                    <div className="flex items-center bg-gray-100 dark:bg-gray-700 rounded-lg p-1 mr-2">
+                                        <button onClick={handleBatchCopy} className="p-2 text-gray-600 dark:text-gray-300 hover:text-green-600 hover:bg-white dark:hover:bg-gray-600 rounded transition-colors" title="Copy toàn bộ kết quả các phần">
+                                            <CopyIcon className="h-5 w-5"/>
+                                        </button>
+                                        <div className="w-px h-4 bg-gray-300 dark:bg-gray-600 mx-1"></div>
+                                        <button onClick={handleBatchDownload} className="p-2 text-gray-600 dark:text-gray-300 hover:text-blue-600 hover:bg-white dark:hover:bg-gray-600 rounded transition-colors" title="Tải xuống toàn bộ kết quả các phần (CSV)">
+                                            <DownloadIcon className="h-5 w-5"/>
+                                        </button>
+                                    </div>
+                                )}
+
+                                <div className="space-x-2">
+                                    <button onClick={() => setIsMergedView(false)} className={`px-3 py-1 text-sm rounded-md transition-colors ${!isMergedView ? 'bg-indigo-100 text-indigo-700 font-bold' : 'text-gray-500 hover:bg-gray-100'}`}>
+                                        Từng phần
+                                    </button>
+                                    <button onClick={handleMergeResults} className={`px-3 py-1 text-sm rounded-md transition-colors ${isMergedView ? 'bg-indigo-100 text-indigo-700 font-bold' : 'text-gray-500 hover:bg-gray-100'}`}>
+                                        Gộp & Đối chiếu
+                                    </button>
+                                </div>
                             </div>
                         </div>
 

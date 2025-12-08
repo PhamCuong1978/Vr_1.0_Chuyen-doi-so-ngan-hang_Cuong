@@ -223,7 +223,7 @@ const callGoogleAI = async (apiKey: string, model: string, config: AIRequestConf
         config: {
             systemInstruction: systemInstruction,
             responseMimeType: config.jsonMode ? "application/json" : "text/plain",
-            temperature: 0.05, // GIẢM TEMPERATURE xuông thấp nhất để AI không "sáng tạo"
+            temperature: 0, // QUAN TRỌNG: Set về 0 để kết quả nhất quán nhất có thể (Deterministic)
             safetySettings: SAFETY_SETTINGS_BLOCK_NONE, // Quan trọng: Tắt bộ lọc an toàn
         }
     });
@@ -350,7 +350,7 @@ export const processStatement = async (
     isPartial: boolean = false,
     onStatusUpdate?: (model: string, keyIndex: number) => void
 ): Promise<GeminiResponse> => {
-    // --- UPDATED SYSTEM PROMPT (v1.6.6 - Header Context Warning) ---
+    // --- UPDATED SYSTEM PROMPT (v1.6.9 - Strict Consistency Rule) ---
     const systemPrompt = `Bạn là Chuyên gia Xử lý Dữ liệu Kế toán Ngân hàng (Google Gemini AI).
     Nhiệm vụ: Chuyển đổi văn bản sao kê ngân hàng thành JSON chuẩn.
 
@@ -360,18 +360,18 @@ export const processStatement = async (
     - **GỘP DÒNG:** Nếu một dòng chỉ chứa Chữ (Diễn giải) mà KHÔNG có Số tiền và Ngày tháng -> Đó là phần mô tả bị xuống dòng của giao dịch phía trên. Hãy gộp nó vào "description" của giao dịch trước đó.
     - **LOẠI BỎ RÁC:** Các dòng tiêu đề lặp lại (Ngày, Số dư, Debit, Credit...), dòng tổng cộng trang, dòng số dư chuyển sang trang sau -> **BỎ QUA, KHÔNG XUẤT RA JSON**.
 
-    ### 2. QUY TẮC ĐỊNH KHOẢN (NGƯỢC CHIỀU NGÂN HÀNG - LƯU Ý KỸ):
-    - **GHI NHỚ:** Sổ phụ Ngân hàng NGƯỢC với Sổ Kế toán Doanh nghiệp.
-    - Nếu số tiền nằm ở cột **"Ghi Nợ" (Debit) / "Rút" / "Chi"**:
-      => Là Tiền RA khỏi tài khoản.
-      => Trong JSON kế toán, gán vào field **'credit'**.
-    - Nếu số tiền nằm ở cột **"Ghi Có" (Credit) / "Nộp" / "Thu"**:
-      => Là Tiền VÀO tài khoản.
-      => Trong JSON kế toán, gán vào field **'debit'**.
-      
-    ### 3. QUY TẮC DỮ LIỆU SỐ:
-    - Một giao dịch hợp lệ BẮT BUỘC phải có số tiền > 0 ở cột debit HOẶC credit. Nếu cả 2 đều bằng 0, đó KHÔNG phải giao dịch (có thể là dòng ghi chú).
-    - Không tự ý điền số 0 hoặc bịa ngày tháng cho các dòng text lẻ loi.
+    ### 2. QUY TẮC ĐỊNH KHOẢN (NGƯỢC CHIỀU NGÂN HÀNG):
+    - **Cột "Ghi Nợ" (Debit) / "Rút" / "Chi"** => JSON: **'credit'** (Tiền RA).
+    - **Cột "Ghi Có" (Credit) / "Nộp" / "Thu"** => JSON: **'debit'** (Tiền VÀO).
+
+    ### 3. QUY TẮC TÁCH PHÍ & VAT (QUAN TRỌNG NHẤT - STRICT):
+    - Mục tiêu: Thống nhất số liệu. Tổng tiền giao dịch = (credit/debit) + fee + vat.
+    - **NẾU** bạn tìm thấy Phí (fee) hoặc VAT trong nội dung giao dịch:
+      => **BẮT BUỘC PHẢI TRỪ ĐI** số tiền phí/VAT đó khỏi số tiền gốc (debit/credit).
+      => Ví dụ: Giao dịch ghi "Tổng nợ: 110.000 (đã bao gồm 10.000 phí)".
+         -> JSON OUTPUT: { "credit": 100000, "fee": 10000, "vat": 0 }
+         -> TUYỆT ĐỐI KHÔNG ĐƯỢC ĐỂ: { "credit": 110000, "fee": 10000 } (Vì như vậy khi cộng lại sẽ thành 120.000 -> Sai).
+    - **NẾU** không tách được: Để fee=0, vat=0 và điền toàn bộ số tiền vào debit/credit.
 
     ### 4. CẤU TRÚC JSON OUTPUT:
     {
@@ -383,8 +383,8 @@ export const processStatement = async (
                 "transactionCode": "string", 
                 "date": "DD/MM/YYYY", 
                 "description": "string (Đã gộp dòng text lẻ)", 
-                "debit": number (Tiền VÀO TK / Ngân hàng Báo CÓ), 
-                "credit": number (Tiền RA TK / Ngân hàng Báo NỢ), 
+                "debit": number (Tiền VÀO TK. Chỉ điền phần GỐC nếu có tách phí), 
+                "credit": number (Tiền RA TK. Chỉ điền phần GỐC nếu có tách phí), 
                 "fee": number, 
                 "vat": number 
             }
