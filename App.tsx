@@ -39,7 +39,7 @@ export default function App() {
     const isLoading = loadingState !== 'idle';
     
     useEffect(() => {
-        console.log(`App Version ${CURRENT_VERSION} Loaded - Advanced Merge Edition`);
+        console.log(`App Version ${CURRENT_VERSION} Loaded - No Data Loss Edition`);
         return () => {
             if (uploadInterval.current) clearInterval(uploadInterval.current);
         };
@@ -170,20 +170,27 @@ export default function App() {
                     chunkSize = parseInt(chunkStrategy);
                 }
 
+                // FIX LỖI MẤT DỮ LIỆU ĐẦU FILE (v1.6.7)
+                // Lấy 20 dòng đầu làm header để tham khảo cho các phần SAU
                 const HEADER_ROWS = 20; 
                 const headerText = allLines.slice(0, HEADER_ROWS).join('\n');
-                const bodyLines = allLines.slice(HEADER_ROWS);
-
-                const sourceLines = bodyLines.length > 0 ? bodyLines : allLines;
-                const effectiveHeader = bodyLines.length > 0 ? headerText : "";
+                
+                // QUAN TRỌNG: KHÔNG ĐƯỢC CẮT BỎ HEADER KHỎI SOURCE LINES
+                // Trước đây: const sourceLines = allLines.slice(HEADER_ROWS); -> SAI, mất dữ liệu
+                // Bây giờ: const sourceLines = allLines; -> ĐÚNG
+                const sourceLines = allLines;
 
                 for (let i = 0; i < sourceLines.length; i += chunkSize) {
                     const chunkBodyLines = sourceLines.slice(i, i + chunkSize);
                     const chunkBody = chunkBodyLines.join('\n');
                     
-                    const contextContent = effectiveHeader 
-                        ? `--- HEADER CONTEXT ---\n${effectiveHeader}\n--- END HEADER ---\n\n${chunkBody}` 
-                        : chunkBody;
+                    let contextContent = chunkBody;
+
+                    // Chỉ chèn Header Context cho các phần từ thứ 2 trở đi (i > 0)
+                    // Phần đầu tiên (i=0) đã chứa sẵn header tự nhiên, không cần chèn thêm để tránh lặp
+                    if (i > 0 && headerText) {
+                         contextContent = `--- HEADER CONTEXT (INFO ONLY - DO NOT EXTRACT) ---\n${headerText}\n--- END HEADER ---\n\n${chunkBody}`;
+                    }
 
                     const previewStart = chunkBodyLines.slice(0, 3).map(l => l.trim()).filter(l => l).join('\n') || "(Trống)";
                     const previewEnd = chunkBodyLines.slice(-3).map(l => l.trim()).filter(l => l).join('\n') || "(Trống)";
@@ -311,7 +318,7 @@ export default function App() {
         setActiveKeyInfo('');
     };
 
-    // --- MERGE LOGIC WITH RECONCILIATION ---
+    // --- MERGE LOGIC WITH GLOBAL DEDUPLICATION ---
     const handleMergeResults = () => {
         // Chỉ gộp những phần đã hoàn thành VÀ được tick chọn
         const chunksToMerge = chunks.filter(c => c.status === 'completed' && c.result && c.isCheckedForMerge);
@@ -327,34 +334,65 @@ export default function App() {
         let allTransactions: Transaction[] = [];
         let firstAccountInfo = sortedChunks[0].result?.accountInfo;
         
-        // 1. Logic Số dư đầu kỳ (Opening Balance)
-        // Nếu người dùng nhập tay ở Input -> Ưu tiên dùng.
-        // Nếu không nhập tay -> Lấy số dư đầu kỳ của Phần ĐƯỢC CHỌN ĐẦU TIÊN (Sorted Chunk 0).
-        let globalOpening = 0;
+        // --- 1. GLOBAL SMART DEDUPLICATION ---
+        // Sử dụng một Set toàn cục để lưu "chữ ký" của TẤT CẢ các giao dịch đã duyệt qua.
+        // Điều này đảm bảo nếu Phần 2, Phần 3... có lặp lại giao dịch của Phần 1 (do Header Context), nó sẽ bị loại bỏ.
         
+        const globalSeenSignatures = new Set<string>();
+        
+        // Helper tạo chữ ký duy nhất cho giao dịch (Vân tay)
+        const createTxSignature = (tx: Transaction) => {
+            // Chữ ký gồm: Ngày + Nợ + Có.
+            // Nếu có Mã GD -> Dùng Mã GD.
+            // Nếu KHÔNG có Mã GD -> Dùng 30 ký tự đầu của Diễn giải (đã chuẩn hóa) để phân biệt.
+            const normalizedDesc = tx.description 
+                ? tx.description.toLowerCase().replace(/\s/g, '').substring(0, 30) 
+                : 'nodesc';
+            
+            const normalizedCode = tx.transactionCode 
+                ? tx.transactionCode.trim().toLowerCase() 
+                : normalizedDesc; // Fallback dùng description nếu ko có code
+            
+            return `${tx.date}|${tx.debit}|${tx.credit}|${normalizedCode}`;
+        };
+
+        sortedChunks.forEach((chunk) => {
+            if (!chunk.result?.transactions) return;
+
+            // Lọc rác cơ bản trước
+            const valid = chunk.result.transactions.filter(tx => 
+                !tx.description.toLowerCase().includes("số dư đầu kỳ") &&
+                !tx.description.toLowerCase().includes("cộng phát sinh")
+            );
+
+            // Duyệt qua từng giao dịch trong phần này
+            valid.forEach(tx => {
+                const sig = createTxSignature(tx);
+                
+                // Nếu chữ ký này CHƯA từng xuất hiện trong bất kỳ phần nào trước đó -> Thêm vào
+                if (!globalSeenSignatures.has(sig)) {
+                    globalSeenSignatures.add(sig);
+                    allTransactions.push(tx);
+                } else {
+                    // Nếu đã có rồi -> Bỏ qua (Đây là giao dịch trùng lặp do Header Context)
+                    console.log("Phát hiện trùng lặp, loại bỏ:", tx);
+                }
+            });
+        });
+
+        // --- 2. Logic Số dư đầu kỳ (Opening Balance) ---
+        let globalOpening = 0;
         if (openingBalance) {
             globalOpening = parseFloat(openingBalance.replace(/\./g, '')) || 0;
         } else {
             globalOpening = sortedChunks[0].result?.openingBalance || 0;
         }
 
-        // 2. Logic Số dư cuối kỳ Đọc được (Detected Closing Balance)
-        // Lấy từ phần cuối cùng (được chọn) có thông tin endingBalance > 0
-        // Ưu tiên phần cuối cùng tuyệt đối.
+        // --- 3. Logic Số dư cuối kỳ Đọc được (Detected Closing Balance) ---
         const lastChunk = sortedChunks[sortedChunks.length - 1];
         const detectedEnding = lastChunk.result?.endingBalance || 0;
 
-        // 3. Tổng hợp giao dịch
-        sortedChunks.forEach(c => {
-            if (c.result?.transactions) {
-                const valid = c.result.transactions.filter(tx => 
-                    !tx.description.toLowerCase().includes("số dư đầu kỳ") &&
-                    !tx.description.toLowerCase().includes("cộng phát sinh")
-                );
-                allTransactions = [...allTransactions, ...valid];
-            }
-        });
-
+        // --- 4. Sắp xếp lại thời gian (Sau khi đã khử trùng) ---
         allTransactions.sort((a, b) => {
             const parseDate = (dateStr: string) => {
                 if (!dateStr) return 0;
@@ -372,17 +410,14 @@ export default function App() {
              totalVat: acc.totalVat + (tx.vat || 0),
         }), { totalDebit: 0, totalCredit: 0, totalFee: 0, totalVat: 0 });
 
-        // 4. Tính toán số dư cuối (Calculated Closing Balance)
-        // SDCK = SDĐK + Tổng Tiền Vào (Debit) - Tổng Tiền Ra (Credit + Fee + VAT)
+        // --- 5. Tính toán & Đối chiếu ---
         const calculatedEnding = globalOpening + totalDebit - totalCredit - totalFee - totalVat;
-
-        // 5. Đối chiếu (Reconciliation)
         const diff = Math.abs(calculatedEnding - detectedEnding);
-        // Cho phép sai số nhỏ (100đ) do làm tròn
+        
         if (diff > 100 && detectedEnding !== 0) {
             setBalanceMismatchWarning(`LỆCH SỐ LIỆU: Số dư trên file (Cuối phần ${lastChunk.index}) là ${formatCurrency(detectedEnding)}, nhưng tính toán ra ${formatCurrency(calculatedEnding)}. Chênh lệch: ${formatCurrency(diff)}.`);
         } else {
-            setBalanceMismatchWarning(null); // Khớp
+            setBalanceMismatchWarning(null); 
         }
 
         setMergedResult({
