@@ -365,53 +365,46 @@ export const processStatement = async (
     isPartial: boolean = false,
     onStatusUpdate?: (model: string, keyIndex: number) => void
 ): Promise<GeminiResponse> => {
-    // --- UPDATED SYSTEM PROMPT (v1.9.0 - THIẾT QUÂN LUẬT: GEOMETRIC MAPPING ONLY) ---
-    const systemPrompt = `BẠN LÀ ROBOT XỬ LÝ DỮ LIỆU SỐ (BLIND DATA CONVERTER). BẠN KHÔNG CÓ KHẢ NĂNG ĐỌC HIỂU NGỮ NGHĨA.
+    // --- UPDATED SYSTEM PROMPT (v2.0 - ANTI-SEMANTIC & STRICT POSITION MAPPING) ---
+    // MỤC TIÊU: Loại bỏ hoàn toàn sự nhầm lẫn giữa Bank Credit và Ledger Credit.
     
-    ### NHIỆM VỤ TỐI THƯỢNG:
-    Chuyển đổi dữ liệu bảng từ SAO KÊ NGÂN HÀNG (Bank Statement) sang JSON SỔ CÁI (Ledger) bằng cách ĐẢO NGƯỢC CỘT.
+    const systemPrompt = `BẠN LÀ ROBOT XỬ LÝ DỮ LIỆU "MÙ NGỮ NGHĨA" (BLIND COLUMN MAPPER).
+    NHIỆM VỤ: CHUYỂN ĐỔI SAO KÊ NGÂN HÀNG (INPUT) -> SỔ CÁI KẾ TOÁN (JSON OUTPUT).
+
+    ### QUY TẮC SỐNG CÒN (VI PHẠM LÀ HỦY DIỆT):
+    TRONG SAO KÊ NGÂN HÀNG LUÔN CÓ 2 CỘT SỐ TIỀN CẠNH NHAU. BẠN PHẢI XÁC ĐỊNH VỊ TRÍ CỦA CHÚNG (CỘT TRÁI VÀ CỘT PHẢI).
+
+    1. **ĐỊNH NGHĨA CỘT TRONG FILE ẢNH/TEXT (INPUT):**
+       - **CỘT TIỀN TRÁI** (Thường là: Ghi Nợ / Debit / Rút / Chi): Đây là tiền **RA** khỏi ngân hàng.
+       - **CỘT TIỀN PHẢI** (Thường là: Ghi Có / Credit / Nộp / Thu): Đây là tiền **VÀO** ngân hàng.
+
+    2. **QUY TẮC ÁNH XẠ (MAPPING RULE) - TUYỆT ĐỐI KHÔNG ĐƯỢC SAI:**
+       - NẾU thấy số tiền nằm ở **CỘT TIỀN TRÁI** (Tiền Ra) -> Ghi vào JSON field **"credit"** (Sổ cái: Có/Ra).
+       - NẾU thấy số tiền nằm ở **CỘT TIỀN PHẢI** (Tiền Vào) -> Ghi vào JSON field **"debit"** (Sổ cái: Nợ/Vào).
+
+    ### CẢNH BÁO ĐỎ - CÁC BẪY NGÔN TỪ (TRAP WORDS):
+    - **CẤM TUYỆT ĐỐI** nhìn thấy chữ "Credit" ở Input mà map vào "credit" ở Output. ĐÂY LÀ SAI LẦM CHẾT NGƯỜI.
+    - Input "Credit" (Ghi Có) = Tiền VÀO -> Phải map vào JSON **"debit"**.
+    - Input "Debit" (Ghi Nợ) = Tiền RA -> Phải map vào JSON **"credit"**.
     
-    ### QUY TẮC "THIẾT QUÂN LUẬT" (KHÔNG ĐƯỢC PHÁ VỠ DƯỚI MỌI HÌNH THỨC):
-    
-    1. **TƯ DUY HÌNH HỌC (GEOMETRIC THINKING):**
-       - Bỏ qua nghĩa của từ ngữ. Chỉ nhìn vào CẤU TRÚC BẢNG.
-       - Trong 1 bảng sao kê ngân hàng tiêu chuẩn, thường có 2 cột số tiền nằm cạnh nhau (Debit và Credit).
-       - Cột Số Tiền Bên Trái (thường là Ghi Nợ/Debit/Rút): Là tiền RA khỏi bank.
-       - Cột Số Tiền Bên Phải (thường là Ghi Có/Credit/Nộp): Là tiền VÀO bank.
-    
-    2. **MAPPING ĐẢO NGƯỢC (REVERSE MAPPING):**
-       - Lấy giá trị từ **Cột Ghi Nợ (Cột Trái)** của Bank --> Ghi vào JSON field **"credit"** (Sổ cái: Tiền Ra).
-       - Lấy giá trị từ **Cột Ghi Có (Cột Phải)** của Bank --> Ghi vào JSON field **"debit"** (Sổ cái: Tiền Vào).
-    
-    3. **LUẬT SẮT VỀ CON SỐ (NUMBER STRICT MODE):**
-       - **TUYỆT ĐỐI KHÔNG TỰ Ý THÊM SỐ 0.** (Vd: 1.100.000 là 1 triệu mốt, không phải 1 tỷ mốt).
-       - Nhìn kỹ dấu phân cách. Ở Việt Nam:
-         + Dấu chấm (.) là phân cách hàng ngàn.
-         + Dấu phẩy (,) là phân cách thập phân (hoặc ngược lại tùy bank, nhưng phải nhất quán).
-       - Nếu ảnh mờ không rõ số 0, HÃY DỪNG LẠI và lấy chính xác những gì thấy được. KHÔNG ĐOÁN MÒ.
-       - "Nhìn gà hóa cuốc" là tội nặng nhất. Nếu thấy "1.100.000" mà output "1100000000" -> BẠN ĐÃ SAI.
-    
-    4. **CẤM SUY DIỄN NGỮ NGHĨA:**
-       - **CẤM ĐỌC** cột "Diễn giải" (Description) để đoán Nợ hay Có.
-       - **CHỈ TIN TƯỞNG VỊ TRÍ CỘT.**
-    
-    5. **XỬ LÝ PHÍ & VAT:**
-       - Nếu tìm thấy thông tin Phí/VAT, tách riêng ra field "fee"/"vat".
-       - Số tiền trong debit/credit phải là số gốc trên cột (Gross).
-    
-    ### VÍ DỤ MINH HỌA (HÃY LÀM THEO MẪU NÀY):
-    Input Table:
-    | Ngày | Mã | Diễn giải | Ghi Nợ (Debit) | Ghi Có (Credit) | Số dư |
-    |------|----|-----------|----------------|-----------------|-------|
-    | 01/01| 01 | Thu phí A | 10.000         | 0               | ...   |
-    | 01/01| 02 | Nhận tiền | 0              | 5.000.000       | ...   |
-    
-    Output JSON:
+    ### LUẬT VỀ CON SỐ:
+    - KHÔNG tự thêm số 0.
+    - Dấu chấm (.) là hàng ngàn, dấu phẩy (,) là thập phân (hoặc ngược lại tùy văn bản, nhưng phải nhất quán).
+    - Nếu ảnh mờ, bỏ qua, KHÔNG đoán mò.
+
+    ### VÍ DỤ KHẮC CỐT GHI TÂM:
+    Input Text:
+    | Ngày | Diễn giải | Ghi Nợ (Debit) | Ghi Có (Credit) |
+    |------|-----------|----------------|-----------------|
+    | 01/01| Nhận tiền | 0              | 50.000.000      |  <-- Số nằm bên PHẢI (Credit Bank)
+    | 02/01| Chuyển đi | 2.000.000      | 0               |  <-- Số nằm bên TRÁI (Debit Bank)
+
+    Output JSON (Phải ĐẢO NGƯỢC):
     "transactions": [
-      { "description": "Thu phí A", "credit": 10000, "debit": 0, "fee": 0 },   <-- 10.000 ở cột Trái Bank -> vào JSON Credit
-      { "description": "Nhận tiền", "credit": 0, "debit": 5000000, "fee": 0 } <-- 5.000.000 ở cột Phải Bank -> vào JSON Debit
+       { "description": "Nhận tiền", "debit": 50000000, "credit": 0 },   <-- Input PHẢI -> JSON DEBIT
+       { "description": "Chuyển đi", "debit": 0, "credit": 2000000 }     <-- Input TRÁI -> JSON CREDIT
     ]
-    
+
     ### JSON OUTPUT FORMAT:
     {
         "openingBalance": number, 
@@ -422,8 +415,8 @@ export const processStatement = async (
                 "transactionCode": "string", 
                 "date": "DD/MM/YYYY", 
                 "description": "string", 
-                "debit": number,   <-- (SOURCE: BANK CREDIT COLUMN)
-                "credit": number,  <-- (SOURCE: BANK DEBIT COLUMN)
+                "debit": number,   <-- LẤY TỪ CỘT GHI CÓ (CREDIT/PHẢI) CỦA BANK
+                "credit": number,  <-- LẤY TỪ CỘT GHI NỢ (DEBIT/TRÁI) CỦA BANK
                 "fee": number, 
                 "vat": number 
             }
