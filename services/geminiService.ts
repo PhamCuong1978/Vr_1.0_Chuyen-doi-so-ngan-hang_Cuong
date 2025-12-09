@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, HarmCategory, HarmBlockThreshold } from "@google/genai";
 import type { GeminiResponse, AIChatResponse, ChatMessage, Transaction } from '../types';
 
 // --- CONFIGURATION ---
@@ -184,12 +184,12 @@ interface AIRequestConfig {
 }
 
 // Cấu hình Safety để tránh bị chặn khi đọc sao kê tài chính
-// SỬ DỤNG STRING LITERALS ĐỂ TRÁNH LỖI IMPORT ENUM TỪ SDK
+// Sử dụng Enum từ SDK để đảm bảo đúng Type
 const SAFETY_SETTINGS_BLOCK_NONE = [
-    { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-    { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-    { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-    { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
+    { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+    { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+    { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+    { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
 ];
 
 const callGoogleAI = async (apiKey: string, model: string, config: AIRequestConfig): Promise<string> => {
@@ -326,7 +326,7 @@ const callAIUnified = async (
 export const extractTextFromContent = async (content: { images: { mimeType: string; data: string }[] }): Promise<string> => {
     if (content.images.length === 0) return '';
     // Tăng cường prompt OCR để giữ nguyên cấu trúc bảng
-    const prompt = `OCR MODE: Đọc văn bản. GIỮ NGUYÊN ĐỊNH DẠNG CỘT. Không thêm bớt text.`;
+    const prompt = `OCR MODE: Đọc văn bản. GIỮ NGUYÊN ĐỊNH DẠNG CỘT. Không thêm bớt text. CHÚ Ý KỸ CÁC CON SỐ, DẤU CHẤM VÀ DẤU PHẨY. TUYỆT ĐỐI KHÔNG TỰ THÊM SỐ 0.`;
     
     const keys = getAPIKeys();
     if (keys.length === 0) throw new Error("Chưa có API Key cho OCR.");
@@ -383,12 +383,19 @@ export const processStatement = async (
        - Lấy giá trị từ **Cột Ghi Nợ (Cột Trái)** của Bank --> Ghi vào JSON field **"credit"** (Sổ cái: Tiền Ra).
        - Lấy giá trị từ **Cột Ghi Có (Cột Phải)** của Bank --> Ghi vào JSON field **"debit"** (Sổ cái: Tiền Vào).
     
-    3. **CẤM TUYỆT ĐỐI (STRICTLY FORBIDDEN):**
+    3. **LUẬT SẮT VỀ CON SỐ (NUMBER STRICT MODE):**
+       - **TUYỆT ĐỐI KHÔNG TỰ Ý THÊM SỐ 0.** (Vd: 1.100.000 là 1 triệu mốt, không phải 1 tỷ mốt).
+       - Nhìn kỹ dấu phân cách. Ở Việt Nam:
+         + Dấu chấm (.) là phân cách hàng ngàn.
+         + Dấu phẩy (,) là phân cách thập phân (hoặc ngược lại tùy bank, nhưng phải nhất quán).
+       - Nếu ảnh mờ không rõ số 0, HÃY DỪNG LẠI và lấy chính xác những gì thấy được. KHÔNG ĐOÁN MÒ.
+       - "Nhìn gà hóa cuốc" là tội nặng nhất. Nếu thấy "1.100.000" mà output "1100000000" -> BẠN ĐÃ SAI.
+    
+    4. **CẤM SUY DIỄN NGỮ NGHĨA:**
        - **CẤM ĐỌC** cột "Diễn giải" (Description) để đoán Nợ hay Có.
-       - **CẤM SUY LUẬN** kiểu như: "Thấy chữ 'Thu lãi' nên cho vào debit". SAI! Nếu số tiền 'Thu lãi' nằm ở cột Ghi Nợ của Bank (do bank thu phí/lãi vay), BẮT BUỘC phải map vào JSON "credit".
        - **CHỈ TIN TƯỞNG VỊ TRÍ CỘT.**
     
-    4. **XỬ LÝ PHÍ & VAT:**
+    5. **XỬ LÝ PHÍ & VAT:**
        - Nếu tìm thấy thông tin Phí/VAT, tách riêng ra field "fee"/"vat".
        - Số tiền trong debit/credit phải là số gốc trên cột (Gross).
     
