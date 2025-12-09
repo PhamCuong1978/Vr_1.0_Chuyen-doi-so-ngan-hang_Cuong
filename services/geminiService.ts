@@ -1,4 +1,4 @@
-import { GoogleGenAI, HarmCategory, HarmBlockThreshold } from "@google/genai";
+import { GoogleGenAI } from "@google/genai";
 import type { GeminiResponse, AIChatResponse, ChatMessage, Transaction } from '../types';
 
 // --- CONFIGURATION ---
@@ -184,11 +184,12 @@ interface AIRequestConfig {
 }
 
 // Cấu hình Safety để tránh bị chặn khi đọc sao kê tài chính
+// SỬ DỤNG STRING LITERALS ĐỂ TRÁNH LỖI IMPORT ENUM TỪ SDK
 const SAFETY_SETTINGS_BLOCK_NONE = [
-    { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
-    { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
-    { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-    { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+    { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+    { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+    { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+    { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
 ];
 
 const callGoogleAI = async (apiKey: string, model: string, config: AIRequestConfig): Promise<string> => {
@@ -324,7 +325,8 @@ const callAIUnified = async (
  */
 export const extractTextFromContent = async (content: { images: { mimeType: string; data: string }[] }): Promise<string> => {
     if (content.images.length === 0) return '';
-    const prompt = `Bạn là công cụ OCR. Đọc toàn bộ văn bản trong ảnh. Chỉ trả về text, không thêm lời dẫn. Giữ nguyên định dạng bảng.`;
+    // Tăng cường prompt OCR để giữ nguyên cấu trúc bảng
+    const prompt = `OCR MODE: Đọc văn bản. GIỮ NGUYÊN ĐỊNH DẠNG CỘT. Không thêm bớt text.`;
     
     const keys = getAPIKeys();
     if (keys.length === 0) throw new Error("Chưa có API Key cho OCR.");
@@ -363,35 +365,47 @@ export const processStatement = async (
     isPartial: boolean = false,
     onStatusUpdate?: (model: string, keyIndex: number) => void
 ): Promise<GeminiResponse> => {
-    // --- UPDATED SYSTEM PROMPT (v1.8.0 - HARD RULES FOR MAPPING) ---
-    const systemPrompt = `Bạn là Chuyên gia Xử lý Dữ liệu Kế toán Ngân hàng (Google Gemini AI).
-    Nhiệm vụ: Chuyển đổi văn bản sao kê ngân hàng thành JSON chuẩn.
-
-    ### 1. QUY TẮC BẤT DI BẤT DỊCH VỀ CẤU TRÚC (CHỐNG ẢO GIÁC & TRÙNG LẶP):
-    - Nếu văn bản có phần "HEADER CONTEXT", đó chỉ là thông tin tiêu đề. KHÔNG trích xuất lại các giao dịch trong đó. Chỉ trích xuất phần BODY.
-    - KHÔNG tách 1 dòng giao dịch sao kê thành nhiều dòng JSON.
-    - Loại bỏ các dòng tiêu đề lặp lại hoặc số dư đầu/cuối trang.
-
-    ### 2. QUY TẮC ĐỊNH KHOẢN (NGUYÊN TẮC VÀNG - BẮT BUỘC TUÂN THỦ 100%):
-    Đây là quá trình chuyển đổi từ **SỔ PHỤ NGÂN HÀNG** sang **SỔ CÁI KẾ TOÁN**. Các cột sẽ bị ĐẢO NGƯỢC.
+    // --- UPDATED SYSTEM PROMPT (v1.9.0 - THIẾT QUÂN LUẬT: GEOMETRIC MAPPING ONLY) ---
+    const systemPrompt = `BẠN LÀ ROBOT XỬ LÝ DỮ LIỆU SỐ (BLIND DATA CONVERTER). BẠN KHÔNG CÓ KHẢ NĂNG ĐỌC HIỂU NGỮ NGHĨA.
     
-    - **INPUT:** Cột "Ghi Nợ" / "Debit" / "Rút" / "Chi" trên File ảnh/PDF.
-      -> **OUTPUT JSON:** field **'credit'** (Phát Sinh CÓ - Tiền RA).
-      
-    - **INPUT:** Cột "Ghi Có" / "Credit" / "Nộp" / "Thu" trên File ảnh/PDF.
-      -> **OUTPUT JSON:** field **'debit'** (Phát Sinh NỢ - Tiền VÀO).
-
-    **CẢNH BÁO QUAN TRỌNG (NGHIÊM CẤM SUY DIỄN):**
-    - **TUYỆT ĐỐI KHÔNG** được đọc nội dung Diễn giải (Description) để tự ý phân loại Nợ/Có.
-    - **VÍ DỤ CẤM:** Dù nội dung ghi là "Thu lãi", "Hoàn tiền", "Nhận lương"... nhưng nếu con số nằm ở cột **DEBIT** của file Bank -> Bắt buộc phải đưa vào field **'credit'** (Tiền ra).
-    - **VÍ DỤ CẤM:** Dù nội dung ghi là "Trả nợ", "Chi phí"... nhưng nếu con số nằm ở cột **CREDIT** của file Bank -> Bắt buộc phải đưa vào field **'debit'** (Tiền vào).
-    - **HÃY TIN TƯỞNG TUYỆT ĐỐI VÀO CẤU TRÚC CỘT.** Đừng cố gắng "thông minh" hơn dữ liệu gốc.
-
-    ### 3. QUY TẮC PHÍ & VAT:
-    - Nếu tìm thấy thông tin Phí/VAT trong nội dung diễn giải, hãy trích xuất vào field "fee" và "vat".
-    - Số tiền hiển thị trên cột của Bank là số TỔNG (Gross). Hãy trích xuất y nguyên số đó vào debit/credit.
-
-    ### 4. CẤU TRÚC JSON OUTPUT:
+    ### NHIỆM VỤ TỐI THƯỢNG:
+    Chuyển đổi dữ liệu bảng từ SAO KÊ NGÂN HÀNG (Bank Statement) sang JSON SỔ CÁI (Ledger) bằng cách ĐẢO NGƯỢC CỘT.
+    
+    ### QUY TẮC "THIẾT QUÂN LUẬT" (KHÔNG ĐƯỢC PHÁ VỠ DƯỚI MỌI HÌNH THỨC):
+    
+    1. **TƯ DUY HÌNH HỌC (GEOMETRIC THINKING):**
+       - Bỏ qua nghĩa của từ ngữ. Chỉ nhìn vào CẤU TRÚC BẢNG.
+       - Trong 1 bảng sao kê ngân hàng tiêu chuẩn, thường có 2 cột số tiền nằm cạnh nhau (Debit và Credit).
+       - Cột Số Tiền Bên Trái (thường là Ghi Nợ/Debit/Rút): Là tiền RA khỏi bank.
+       - Cột Số Tiền Bên Phải (thường là Ghi Có/Credit/Nộp): Là tiền VÀO bank.
+    
+    2. **MAPPING ĐẢO NGƯỢC (REVERSE MAPPING):**
+       - Lấy giá trị từ **Cột Ghi Nợ (Cột Trái)** của Bank --> Ghi vào JSON field **"credit"** (Sổ cái: Tiền Ra).
+       - Lấy giá trị từ **Cột Ghi Có (Cột Phải)** của Bank --> Ghi vào JSON field **"debit"** (Sổ cái: Tiền Vào).
+    
+    3. **CẤM TUYỆT ĐỐI (STRICTLY FORBIDDEN):**
+       - **CẤM ĐỌC** cột "Diễn giải" (Description) để đoán Nợ hay Có.
+       - **CẤM SUY LUẬN** kiểu như: "Thấy chữ 'Thu lãi' nên cho vào debit". SAI! Nếu số tiền 'Thu lãi' nằm ở cột Ghi Nợ của Bank (do bank thu phí/lãi vay), BẮT BUỘC phải map vào JSON "credit".
+       - **CHỈ TIN TƯỞNG VỊ TRÍ CỘT.**
+    
+    4. **XỬ LÝ PHÍ & VAT:**
+       - Nếu tìm thấy thông tin Phí/VAT, tách riêng ra field "fee"/"vat".
+       - Số tiền trong debit/credit phải là số gốc trên cột (Gross).
+    
+    ### VÍ DỤ MINH HỌA (HÃY LÀM THEO MẪU NÀY):
+    Input Table:
+    | Ngày | Mã | Diễn giải | Ghi Nợ (Debit) | Ghi Có (Credit) | Số dư |
+    |------|----|-----------|----------------|-----------------|-------|
+    | 01/01| 01 | Thu phí A | 10.000         | 0               | ...   |
+    | 01/01| 02 | Nhận tiền | 0              | 5.000.000       | ...   |
+    
+    Output JSON:
+    "transactions": [
+      { "description": "Thu phí A", "credit": 10000, "debit": 0, "fee": 0 },   <-- 10.000 ở cột Trái Bank -> vào JSON Credit
+      { "description": "Nhận tiền", "credit": 0, "debit": 5000000, "fee": 0 } <-- 5.000.000 ở cột Phải Bank -> vào JSON Debit
+    ]
+    
+    ### JSON OUTPUT FORMAT:
     {
         "openingBalance": number, 
         "endingBalance": number,
@@ -401,8 +415,8 @@ export const processStatement = async (
                 "transactionCode": "string", 
                 "date": "DD/MM/YYYY", 
                 "description": "string", 
-                "debit": number (Lấy từ cột Credit/Thu của Bank), 
-                "credit": number (Lấy từ cột Debit/Chi của Bank), 
+                "debit": number,   <-- (SOURCE: BANK CREDIT COLUMN)
+                "credit": number,  <-- (SOURCE: BANK DEBIT COLUMN)
                 "fee": number, 
                 "vat": number 
             }
