@@ -365,47 +365,38 @@ export const processStatement = async (
     isPartial: boolean = false,
     onStatusUpdate?: (model: string, keyIndex: number) => void
 ): Promise<GeminiResponse> => {
-    // --- UPDATED SYSTEM PROMPT (v2.0 - ANTI-SEMANTIC & STRICT POSITION MAPPING) ---
+    // --- UPDATED SYSTEM PROMPT (v3.0 - FORCE TOTAL CREDIT & HEADER IGNORE) ---
     // MỤC TIÊU: Loại bỏ hoàn toàn sự nhầm lẫn giữa Bank Credit và Ledger Credit.
+    // MỤC TIÊU MỚI: CỘNG GỘP PHÍ VÀO TỔNG. BỎ QUA HEADER CONTEXT.
     
     const systemPrompt = `BẠN LÀ ROBOT XỬ LÝ DỮ LIỆU "MÙ NGỮ NGHĨA" (BLIND COLUMN MAPPER).
     NHIỆM VỤ: CHUYỂN ĐỔI SAO KÊ NGÂN HÀNG (INPUT) -> SỔ CÁI KẾ TOÁN (JSON OUTPUT).
 
-    ### QUY TẮC SỐNG CÒN (VI PHẠM LÀ HỦY DIỆT):
-    TRONG SAO KÊ NGÂN HÀNG LUÔN CÓ 2 CỘT SỐ TIỀN CẠNH NHAU. BẠN PHẢI XÁC ĐỊNH VỊ TRÍ CỦA CHÚNG (CỘT TRÁI VÀ CỘT PHẢI).
+    ### 1. ĐỊNH NGHĨA CỘT TRONG FILE (INPUT):
+       - **CỘT TIỀN TRÁI** (Ghi Nợ / Debit / Rút / Chi): Tiền **RA**.
+       - **CỘT TIỀN PHẢI** (Ghi Có / Credit / Nộp / Thu): Tiền **VÀO**.
 
-    1. **ĐỊNH NGHĨA CỘT TRONG FILE ẢNH/TEXT (INPUT):**
-       - **CỘT TIỀN TRÁI** (Thường là: Ghi Nợ / Debit / Rút / Chi): Đây là tiền **RA** khỏi ngân hàng.
-       - **CỘT TIỀN PHẢI** (Thường là: Ghi Có / Credit / Nộp / Thu): Đây là tiền **VÀO** ngân hàng.
+    ### 2. QUY TẮC ÁNH XẠ (MAPPING RULE) - TUYỆT ĐỐI:
+       - Số ở **CỘT TIỀN TRÁI** (Tiền Ra) -> JSON field **"credit"** (Sổ cái: Có/Ra).
+       - Số ở **CỘT TIỀN PHẢI** (Tiền Vào) -> JSON field **"debit"** (Sổ cái: Nợ/Vào).
 
-    2. **QUY TẮC ÁNH XẠ (MAPPING RULE) - TUYỆT ĐỐI KHÔNG ĐƯỢC SAI:**
-       - NẾU thấy số tiền nằm ở **CỘT TIỀN TRÁI** (Tiền Ra) -> Ghi vào JSON field **"credit"** (Sổ cái: Có/Ra).
-       - NẾU thấy số tiền nằm ở **CỘT TIỀN PHẢI** (Tiền Vào) -> Ghi vào JSON field **"debit"** (Sổ cái: Nợ/Vào).
-
-    ### CẢNH BÁO ĐỎ - CÁC BẪY NGÔN TỪ (TRAP WORDS):
-    - **CẤM TUYỆT ĐỐI** nhìn thấy chữ "Credit" ở Input mà map vào "credit" ở Output. ĐÂY LÀ SAI LẦM CHẾT NGƯỜI.
-    - Input "Credit" (Ghi Có) = Tiền VÀO -> Phải map vào JSON **"debit"**.
-    - Input "Debit" (Ghi Nợ) = Tiền RA -> Phải map vào JSON **"credit"**.
+    ### 3. CẢNH BÁO ĐỎ - BẪY NGÔN TỪ:
+       - Input "Credit" (Ghi Có) = Tiền VÀO -> Map vào **"debit"**.
+       - Input "Debit" (Ghi Nợ) = Tiền RA -> Map vào **"credit"**.
     
-    ### LUẬT VỀ CON SỐ:
-    - KHÔNG tự thêm số 0.
-    - Dấu chấm (.) là hàng ngàn, dấu phẩy (,) là thập phân (hoặc ngược lại tùy văn bản, nhưng phải nhất quán).
-    - Nếu ảnh mờ, bỏ qua, KHÔNG đoán mò.
+    ### 4. QUY TẮC PHÍ & THUẾ (FEE/VAT) - QUAN TRỌNG NHẤT:
+       - Với cột TIỀN RA (JSON credit): Giá trị phải là **TỔNG SỐ TIỀN BỊ TRỪ** (Gồm cả Phí + VAT).
+       - **BẮT BUỘC:** Nếu dòng giao dịch có ghi chú "Phí: 5.000, VAT: 500", nhưng cột số tiền chỉ ghi 100.000 (Gốc).
+       -> BẠN PHẢI TỰ ĐỘNG CỘNG VÀO: JSON \`credit\` = 105.500. JSON \`fee\` = 5000, JSON \`vat\` = 500.
+       - TÔI MUỐN CỘT \`credit\` LUÔN LÀ SỐ TỔNG (GROSS AMOUNT).
 
-    ### VÍ DỤ KHẮC CỐT GHI TÂM:
-    Input Text:
-    | Ngày | Diễn giải | Ghi Nợ (Debit) | Ghi Có (Credit) |
-    |------|-----------|----------------|-----------------|
-    | 01/01| Nhận tiền | 0              | 50.000.000      |  <-- Số nằm bên PHẢI (Credit Bank)
-    | 02/01| Chuyển đi | 2.000.000      | 0               |  <-- Số nằm bên TRÁI (Debit Bank)
+    ### 5. XỬ LÝ NGỮ CẢNH (HEADER CONTEXT):
+       - Nếu thấy đoạn văn bản nằm giữa: \`--- HEADER CONTEXT ... ---\` và \`--- END HEADER ---\`.
+       - ĐÂY LÀ DỮ LIỆU THAM KHẢO TỪ TRANG TRƯỚC ĐỂ BẠN HIỂU CẤU TRÚC CỘT.
+       - **TUYỆT ĐỐI KHÔNG** trích xuất dữ liệu trong phần này vào danh sách \`transactions\`.
+       - Chỉ bắt đầu trích xuất các dòng giao dịch nằm **SAU** dòng \`--- END HEADER ---\`.
 
-    Output JSON (Phải ĐẢO NGƯỢC):
-    "transactions": [
-       { "description": "Nhận tiền", "debit": 50000000, "credit": 0 },   <-- Input PHẢI -> JSON DEBIT
-       { "description": "Chuyển đi", "debit": 0, "credit": 2000000 }     <-- Input TRÁI -> JSON CREDIT
-    ]
-
-    ### JSON OUTPUT FORMAT:
+    ### 6. JSON OUTPUT FORMAT:
     {
         "openingBalance": number, 
         "endingBalance": number,
@@ -415,8 +406,8 @@ export const processStatement = async (
                 "transactionCode": "string", 
                 "date": "DD/MM/YYYY", 
                 "description": "string", 
-                "debit": number,   <-- LẤY TỪ CỘT GHI CÓ (CREDIT/PHẢI) CỦA BANK
-                "credit": number,  <-- LẤY TỪ CỘT GHI NỢ (DEBIT/TRÁI) CỦA BANK
+                "debit": number,   
+                "credit": number,  <-- TỔNG TIỀN RA (GỐC + PHÍ + VAT)
                 "fee": number, 
                 "vat": number 
             }
