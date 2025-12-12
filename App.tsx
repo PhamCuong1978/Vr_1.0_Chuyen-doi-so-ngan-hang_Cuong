@@ -341,6 +341,28 @@ export default function App() {
         // Reset status
         setChunks(prev => prev.map(c => c.isSelected ? { ...c, status: 'idle', result: undefined, error: undefined, processingMessage: undefined, isResultExpanded: true, isCheckedForMerge: true } : c));
 
+        // --- GLOBAL DEDUPLICATION SET (Real-time) ---
+        // Dùng để khử trùng lặp Header Context ngay khi xử lý từng phần
+        const processedSignatures = new Set<string>();
+
+        // Helper tạo chữ ký (giống logic merge)
+        const createTxSignature = (tx: Transaction) => {
+            const normalizedDesc = tx.description 
+                ? tx.description.toLowerCase().replace(/\s/g, '').substring(0, 30) 
+                : 'nodesc';
+            const normalizedCode = tx.transactionCode 
+                ? tx.transactionCode.trim().toLowerCase() 
+                : normalizedDesc;
+            return `${tx.date}|${tx.debit}|${tx.credit}|${normalizedCode}`;
+        };
+
+        const parseDate = (dateStr: string) => {
+            if (!dateStr) return 0;
+            const parts = dateStr.split('/');
+            if (parts.length === 3) return new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0])).getTime();
+            return 0;
+        };
+
         for (const chunk of selectedChunks) {
             setChunks(prev => prev.map(c => c.id === chunk.id ? { ...c, status: 'processing' } : c));
             setProcessingStatus(`Đang xử lý phần ${chunk.index}...`);
@@ -363,6 +385,29 @@ export default function App() {
                     const text = await extractTextFromContent({ images: [{ mimeType: 'image/jpeg', data: chunk.data }] });
                     result = await processStatement({ text: text }, true, statusCallback);
                 }
+
+                // --- LOGIC MỚI: CLEANUP & SORTING NGAY SAU KHI CÓ KẾT QUẢ ---
+                if (result && result.transactions) {
+                    const uniqueTransactions: Transaction[] = [];
+
+                    result.transactions.forEach(tx => {
+                        const sig = createTxSignature(tx);
+                        
+                        // Nếu chữ ký này CHƯA từng xuất hiện trong đợt xử lý Batch này -> Thêm vào
+                        // (Điều này sẽ tự động loại bỏ Header Context ở các phần từ thứ 2 trở đi vì phần 1 đã add vào Set rồi)
+                        if (!processedSignatures.has(sig)) {
+                            processedSignatures.add(sig);
+                            uniqueTransactions.push(tx);
+                        }
+                    });
+
+                    // Sắp xếp theo ngày tăng dần cho phần này
+                    uniqueTransactions.sort((a, b) => parseDate(a.date) - parseDate(b.date));
+
+                    // Gán lại
+                    result.transactions = uniqueTransactions;
+                }
+                // -----------------------------------------------------------
 
                 setChunks(prev => prev.map(c => c.id === chunk.id ? { 
                     ...c, 
@@ -404,48 +449,33 @@ export default function App() {
         let allTransactions: Transaction[] = [];
         let firstAccountInfo = sortedChunks[0].result?.accountInfo;
         
-        // --- 1. GLOBAL SMART DEDUPLICATION ---
-        // Sử dụng một Set toàn cục để lưu "chữ ký" của TẤT CẢ các giao dịch đã duyệt qua.
-        // Điều này đảm bảo nếu Phần 2, Phần 3... có lặp lại giao dịch của Phần 1 (do Header Context), nó sẽ bị loại bỏ.
-        
+        // --- 1. GLOBAL SMART DEDUPLICATION (REDUNDANT CHECK BUT SAFE) ---
+        // Mặc dù đã khử ở handleSubmit, nhưng vẫn giữ logic này phòng trường hợp user merge các phần rời rạc
         const globalSeenSignatures = new Set<string>();
         
-        // Helper tạo chữ ký duy nhất cho giao dịch (Vân tay)
         const createTxSignature = (tx: Transaction) => {
-            // Chữ ký gồm: Ngày + Nợ + Có.
-            // Nếu có Mã GD -> Dùng Mã GD.
-            // Nếu KHÔNG có Mã GD -> Dùng 30 ký tự đầu của Diễn giải (đã chuẩn hóa) để phân biệt.
             const normalizedDesc = tx.description 
                 ? tx.description.toLowerCase().replace(/\s/g, '').substring(0, 30) 
                 : 'nodesc';
-            
             const normalizedCode = tx.transactionCode 
                 ? tx.transactionCode.trim().toLowerCase() 
-                : normalizedDesc; // Fallback dùng description nếu ko có code
-            
+                : normalizedDesc;
             return `${tx.date}|${tx.debit}|${tx.credit}|${normalizedCode}`;
         };
 
         sortedChunks.forEach((chunk) => {
             if (!chunk.result?.transactions) return;
 
-            // Lọc rác cơ bản trước
             const valid = chunk.result.transactions.filter(tx => 
                 !tx.description.toLowerCase().includes("số dư đầu kỳ") &&
                 !tx.description.toLowerCase().includes("cộng phát sinh")
             );
 
-            // Duyệt qua từng giao dịch trong phần này
             valid.forEach(tx => {
                 const sig = createTxSignature(tx);
-                
-                // Nếu chữ ký này CHƯA từng xuất hiện trong bất kỳ phần nào trước đó -> Thêm vào
                 if (!globalSeenSignatures.has(sig)) {
                     globalSeenSignatures.add(sig);
                     allTransactions.push(tx);
-                } else {
-                    // Nếu đã có rồi -> Bỏ qua (Đây là giao dịch trùng lặp do Header Context)
-                    console.log("Phát hiện trùng lặp, loại bỏ:", tx);
                 }
             });
         });
