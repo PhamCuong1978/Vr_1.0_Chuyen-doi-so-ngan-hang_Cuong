@@ -17,9 +17,9 @@ export default function App() {
     const [openingBalance, setOpeningBalance] = useState('');
     const [chunks, setChunks] = useState<ProcessedChunk[]>([]);
     
-    // Config chia nhỏ - Mặc định là 50 dòng cho an toàn
-    const [chunkStrategy, setChunkStrategy] = useState<ChunkStrategy>('50');
-    const [recommendedStrategy, setRecommendedStrategy] = useState<ChunkStrategy>('50');
+    // Config chia nhỏ - Mặc định là 30 dòng cho chi tiết nhất (Thay đổi theo yêu cầu v1.0.2)
+    const [chunkStrategy, setChunkStrategy] = useState<ChunkStrategy>('30');
+    const [recommendedStrategy, setRecommendedStrategy] = useState<ChunkStrategy>('30');
 
     const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
     const [uploadState, setUploadState] = useState<UploadState>('idle');
@@ -216,15 +216,15 @@ export default function App() {
                 }
             }
 
-            // 2. Logic đề xuất chiến lược (Cập nhật theo các mức mới)
+            // 2. Logic đề xuất chiến lược (Cập nhật theo các mức mới - Ưu tiên 30 dòng)
             const totalLines = allLines.length;
-            let suggestion: ChunkStrategy = '50';
+            let suggestion: ChunkStrategy = '30';
             
-            if (totalLines > 3000) suggestion = '200';
-            else if (totalLines > 1000) suggestion = '100';
-            else if (totalLines > 500) suggestion = '50';
-            else if (totalLines > 0 && totalLines <= 300) suggestion = 'ALL'; 
-            else if (totalLines > 0) suggestion = '30'; // Dự phòng cho file rất phức tạp
+            if (totalLines > 5000) suggestion = '200';
+            else if (totalLines > 2000) suggestion = '100';
+            else if (totalLines > 1000) suggestion = '50';
+            else if (totalLines > 0 && totalLines <= 100) suggestion = 'ALL'; 
+            else if (totalLines > 0) suggestion = '30'; // Mặc định cho phần lớn các file (100 - 1000 dòng)
             
             setRecommendedStrategy(suggestion);
             setChunkStrategy(suggestion); 
@@ -233,7 +233,7 @@ export default function App() {
             let finalChunks: ProcessedChunk[] = [...imageChunks];
             
             if (allLines.length > 0) {
-                let chunkSize = 50;
+                let chunkSize = 30; // Default fallback
                 if (chunkStrategy === 'ALL') {
                     chunkSize = Math.max(1, allLines.length);
                 } else {
